@@ -17,7 +17,6 @@ import httpx
 from urllib.parse import quote, urlparse, parse_qs
 
 import yt_dlp
-from pytubefix import YouTube
 import uuid
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,15 +33,14 @@ logger = logging.getLogger("viddl")
 
 # ─── Downloader Binaries ───────────────────────────────────────────────────
 FFMPEG_EXE: Optional[str] = None
-YOUGET_EXE: str = "you-get" # Default to 'you-get' assuming it's in PATH
 IS_KOYEB: bool = os.path.exists("/app") or "KOYEB" in os.environ
 # User provided specific RapidAPI Key
 RAPIDAPI_KEY: Optional[str] = os.environ.get("RAPIDAPI_KEY", "104f93455emsha4a8e06a6af7a46p155429jsn80530d8ea7a9")
 RAPIDAPI_HOST: str = "youtube138.p.rapidapi.com"
 
 def _init_binaries() -> bool:
-    """Detect ffmpeg and you-get binaries and set their paths."""
-    global FFMPEG_EXE, YOUGET_EXE
+    """Detect ffmpeg binaries and set their paths."""
+    global FFMPEG_EXE
 
     # 1. FFmpeg detection
     found_ffmpeg = False
@@ -64,14 +62,8 @@ def _init_binaries() -> bool:
                 found_ffmpeg = True
         except (ImportError, Exception):
             pass
-
-    # 3. you-get detection
-    if sys.platform == "win32":
-        venv_youget = os.path.join(os.getcwd(), ".venv", "Scripts", "you-get.exe")
-        if os.path.exists(venv_youget):
-            YOUGET_EXE = venv_youget
     
-    logger.info(f"Binaries initialized: FFmpeg={FFMPEG_EXE}, you-get={YOUGET_EXE}")
+    logger.info(f"Binaries initialized: FFmpeg={FFMPEG_EXE}")
     return found_ffmpeg
 
 FFMPEG_AVAILABLE: bool = _init_binaries()
@@ -334,200 +326,67 @@ async def fetch_metadata(body: FetchRequest):
     logger.info("Fetching metadata for: %s", url)
     loop = asyncio.get_event_loop()
 
-    # ── Koyeb Force YouTube Fix ──────────────────────────────────────────────
-    # Data center IPs are blocked by yt-dlp. Force pytubefix on Koyeb UNLESS cookies are present.
-    if IS_KOYEB and _is_youtube(url) and not os.path.exists("cookies.txt"):
-        logger.info("Running on Koyeb without cookies: Forcing pytubefix for YouTube")
+    # ── YouTube RapidAPI Exclusive Flow ──────────────────────────────────────
+    if _is_youtube(url):
+        logger.info("Using RapidAPI (youtube138) for YouTube metadata")
+        if not RAPIDAPI_KEY:
+            raise HTTPException(
+                status_code=422, 
+                detail="YouTube downloads require a RAPIDAPI_KEY to be configured on this server."
+            )
+        
         try:
-            def _pytube_extract():
-                # MWEB or WEB_EMBED usually work better on server IPs
-                po_token = os.environ.get('YOUTUBE_PO_TOKEN')
-                visitor_data = os.environ.get('YOUTUBE_VISITOR_DATA')
-                
-                token_file = None
-                if po_token and visitor_data:
-                    try:
-                        tfile = tempfile.NamedTemporaryFile(suffix='.json', mode='w', delete=False)
-                        json.dump({"visitorData": visitor_data, "poToken": po_token}, tfile)
-                        tfile.close()
-                        token_file = tfile.name
-                    except:
-                        pass
-
-                yt = YouTube(
-                    url, 
-                    client='MWEB',
-                    use_po_token=True if token_file else False,
-                    token_file=token_file
+            video_id = _get_youtube_id(url)
+            headers = {
+                "X-RapidAPI-Key": RAPIDAPI_KEY,
+                "X-RapidAPI-Host": RAPIDAPI_HOST
+            }
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    f"https://{RAPIDAPI_HOST}/video/details/", 
+                    params={"id": video_id}, 
+                    headers=headers
                 )
-                res = {
-                    "title": yt.title,
-                    "thumbnail": yt.thumbnail_url,
-                    "duration": yt.length,
-                    "uploader": yt.author,
-                    "extractor_key": "youtube",
-                    "webpage_url": url,
-                    "formats": [], 
-                    "is_pytubefix": True
-                }
-                if token_file:
-                    try: os.unlink(token_file)
-                    except: pass
-                return res
-            info = await loop.run_in_executor(None, _pytube_extract)
-            # Skip to specialized format picker
-            formats = [
-                {"format_id": "pytubefix_720p", "label": "720p (Pytube)", "ext": "mp4", "type": "video", "needs_merge": False},
-                {"format_id": "pytubefix_360p", "label": "360p (Pytube)", "ext": "mp4", "type": "video", "needs_merge": False},
-                {"format_id": "pytubefix_audio", "label": "Audio (Pytube)", "ext": "m4a", "type": "audio"},
-                {"format_id": "youget_best", "label": "Best (you-get)", "ext": "mp4", "type": "video"},
-            ]
-            return JSONResponse({
-                "type": "video",
-                "title": info["title"],
-                "thumbnail": info["thumbnail"],
-                "channel": info["uploader"],
-                "duration": info["duration"],
-                "platform": "youtube",
-                "webpage_url": info["webpage_url"],
-                "formats": formats,
-            })
-        except Exception as pe:
-             logger.error("Koyeb Force Pytube failed: %s", pe)
-             # Fall back to yt-dlp just in case, or let error handle
-    
-    # ── Standard Flow (yt-dlp first) ────────────────────────────────────────
+                data = resp.json()
+                if resp.status_code == 200:
+                    formats = [
+                        {"format_id": "rapidapi_best", "label": "Best Quality (RapidAPI)", "ext": "mp4", "type": "video"},
+                        {"format_id": "rapidapi_mp3", "label": "MP3 Audio (RapidAPI)", "ext": "mp3", "type": "audio"},
+                    ]
+                    return JSONResponse({
+                        "type": "video",
+                        "title": data.get("title", f"YouTube Video {video_id}"),
+                        "thumbnail": data.get("thumbnails", [{}])[-1].get("url"),
+                        "duration": int(data.get("lengthSeconds", 0)),
+                        "channel": data.get("author", {}).get("title"),
+                        "platform": "youtube (rapidapi)",
+                        "webpage_url": url,
+                        "formats": formats
+                    })
+                else:
+                    raise Exception(f"RapidAPI responded with {resp.status_code}: {data.get('message')}")
+        except Exception as e:
+            logger.error("RapidAPI fetch failed: %s", e)
+            raise HTTPException(status_code=422, detail=f"YouTube RapidAPI Error: {str(e)}")
+
+    # ── Standard Flow (Other Platforms) ──────────────────────────────────────
     ydl_opts = _build_ydl_opts(
         {
             "skip_download": True,
             "noplaylist": False,
-            "extract_flat": "in_playlist",  # Fast: list playlist items without fetching each
+            "extract_flat": "in_playlist",
         }
     )
-
     loop = asyncio.get_event_loop()
-
     def _extract():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
-
+    
     try:
         info = await loop.run_in_executor(None, _extract)
     except Exception as e:
-        # If YouTube, try pytubefix as fallback
-        if _is_youtube(url):
-            logger.info("yt-dlp failed for YouTube: %s. Trying pytubefix fallback...", e)
-            try:
-                def _pytube_extract():
-                    # 'WEB' client supports automatic PO Token generation via Node.js
-                    clients = ['WEB', 'MWEB', 'WEB_EMBED', 'ANDROID_VR', 'IOS']
-                    last_err = None
-                    
-                    for client_name in clients:
-                        try:
-                            po_token = os.environ.get('YOUTUBE_PO_TOKEN')
-                            visitor_data = os.environ.get('YOUTUBE_VISITOR_DATA')
-                            
-                            token_file = None
-                            if po_token and visitor_data:
-                                try:
-                                    tfile = tempfile.NamedTemporaryFile(suffix='.json', mode='w', delete=False)
-                                    json.dump({"visitorData": visitor_data, "poToken": po_token}, tfile)
-                                    tfile.close()
-                                    token_file = tfile.name
-                                except: pass
-
-                            yt = YouTube(
-                                url, 
-                                client=client_name,
-                                use_po_token=True, # Always True to allow auto-generation fallback
-                                token_file=token_file,
-                                use_oauth=False,
-                                allow_oauth_cache=False
-                            )
-                            
-                            # Force access to title to trigger network request
-                            _ = yt.title 
-                            
-                            # Cleanup token file after use
-                            if token_file:
-                                try: os.unlink(token_file)
-                                except: pass
-                            
-                            return {
-                                "title": yt.title,
-                                "thumbnail": yt.thumbnail_url,
-                                "duration": yt.length,
-                                "uploader": yt.author,
-                                "extractor_key": f"youtube_{client_name.lower()}",
-                                "webpage_url": url,
-                                "formats": [], 
-                                "is_pytubefix": True
-                            }
-                        except Exception as inner_e:
-                            last_err = inner_e
-                            logger.warn(f"Pytubefix client {client_name} failed: {inner_e}")
-                            continue
-                    
-                    if last_err: raise last_err
-
-                info = await loop.run_in_executor(None, _pytube_extract)
-            except Exception as pe:
-                logger.error("pytubefix also failed: %s", pe)
-                
-                # FINAL FALLBACK: RapidAPI
-                if RAPIDAPI_KEY:
-                    logger.info("Trying RapidAPI (youtube138) fallback for metadata...")
-                    try:
-                        video_id = _get_youtube_id(url)
-                        headers = {
-                            "X-RapidAPI-Key": RAPIDAPI_KEY,
-                            "X-RapidAPI-Host": RAPIDAPI_HOST
-                        }
-                        async with httpx.AsyncClient(timeout=15.0) as client:
-                            resp = await client.get(
-                                f"https://{RAPIDAPI_HOST}/video/details/", 
-                                params={"id": video_id}, 
-                                headers=headers
-                            )
-                            data = resp.json()
-                            if resp.status_code == 200:
-                                info = {
-                                    "title": data.get("title", f"YouTube Video {video_id}"),
-                                    "thumbnail": data.get("thumbnails", [{}])[-1].get("url"),
-                                    "duration": int(data.get("lengthSeconds", 0)),
-                                    "uploader": data.get("author", {}).get("title"),
-                                    "extractor_key": f"{RAPIDAPI_HOST.split('.')[0]}",
-                                    "webpage_url": url,
-                                    "formats": [],
-                                    "is_rapidapi": True
-                                }
-                                formats = [
-                                    {"format_id": "rapidapi_best", "label": "Best (RapidAPI)", "ext": "mp4", "type": "video"},
-                                    {"format_id": "rapidapi_mp3", "label": "MP3 (RapidAPI)", "ext": "mp3", "type": "audio"},
-                                ]
-                                return JSONResponse({
-                                    "type": "video",
-                                    "title": info["title"],
-                                    "thumbnail": info["thumbnail"],
-                                    "duration": info["duration"],
-                                    "channel": info["uploader"],
-                                    "platform": f"youtube ({RAPIDAPI_HOST.split('.')[0]})",
-                                    "webpage_url": url,
-                                    "formats": formats
-                                })
-                    except Exception as ree:
-                        logger.error(f"RapidAPI fallback failed: {ree}")
-
-                # Provide a more helpful message for Koyeb users
-                error_msg = str(e) if "Sign in to confirm" in str(e) else str(pe)
-                raise HTTPException(
-                    status_code=422, 
-                    detail=f"YouTube is blocking this server IP. Try adding YOUTUBE_PO_TOKEN or RAPIDAPI_KEY to environment variables. (Error: {error_msg})"
-                )
-        else:
-            logger.error("yt-dlp error: %s", e)
-            raise HTTPException(status_code=422, detail=f"Could not process URL: {str(e)}")
+        logger.error("yt-dlp error: %s", e)
+        raise HTTPException(status_code=422, detail=f"Could not process URL: {str(e)}")
 
     # ── Playlist ──────────────────────────────────────────────────────────────
     if info.get("_type") == "playlist":
@@ -691,19 +550,13 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
     tmp_path = tmp.name
     tmp.close()
     
-    # If format_id starts with rapidapi_, use RapidAPI worker
-    if body.format_id.startswith("rapidapi_"):
+    if _is_youtube(body.url):
         await _run_rapidapi_download(job_id, body, tmp_path)
         return
 
-    # If format_id starts with youget_, use you-get worker
-    if body.format_id.startswith("youget_"):
-        await _run_youget_download(job_id, body, tmp_path)
-        return
-
-    # If format_id starts with pytubefix_, use pytubefix worker
-    if body.format_id.startswith("pytubefix_"):
-        await _run_pytubefix_download(job_id, body, tmp_path)
+    # If format_id explicitly requested RapidAPI (e.g. from other platform if applicable)
+    if body.format_id.startswith("rapidapi_"):
+        await _run_rapidapi_download(job_id, body, tmp_path)
         return
 
     def _progress_hook(d):
@@ -781,108 +634,7 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
         _cleanup(tmp_path)
 
 
-async def _run_pytubefix_download(job_id: str, body: DownloadJobRequest, tmp_path: str):
-    """Fallback YouTube downloader using pytubefix."""
-    job = JOBS[job_id]
-    job["status"] = "downloading (pytubefix)"
-    
-    loop = asyncio.get_event_loop()
-    try:
-        def _exec():
-            # Try multiple clients for download as well
-            # TVHTML5 is often very resilient for downloads
-            clients = ['TVHTML5', 'WEB_EMBED', 'ANDROID_VR', 'MWEB']
-            last_err = None
-            
-            # PO Token for download
-            po_token = os.environ.get('YOUTUBE_PO_TOKEN')
-            visitor_data = os.environ.get('YOUTUBE_VISITOR_DATA')
-            
-            for client_name in clients:
-                token_file = None
-                try:
-                    if po_token and visitor_data:
-                        tfile = tempfile.NamedTemporaryFile(suffix='.json', mode='w', delete=False)
-                        json.dump({"visitorData": visitor_data, "poToken": po_token}, tfile)
-                        tfile.close()
-                        token_file = tfile.name
 
-                    yt = YouTube(
-                        body.url, 
-                        client=client_name,
-                        use_po_token=True if token_file else False,
-                        token_file=token_file
-                    )
-                    
-                    if body.format_id == "pytubefix_720p":
-                        stream = yt.streams.filter(res="720p", file_extension="mp4").first() or yt.streams.get_highest_resolution()
-                    elif body.format_id == "pytubefix_360p":
-                        stream = yt.streams.filter(res="360p", file_extension="mp4").first()
-                    else:
-                        stream = yt.streams.get_audio_only()
-                    
-                    if not stream:
-                        raise Exception(f"No stream found with client {client_name}")
-                        
-                    out_file = stream.download(output_path=os.path.dirname(tmp_path))
-                    
-                    # Cleanup
-                    if token_file:
-                        try: os.unlink(token_file)
-                        except: pass
-                        
-                    return out_file # Success
-                except Exception as e:
-                    if token_file:
-                        try: os.unlink(token_file)
-                        except: pass
-                    last_err = e
-                    logger.warn(f"Pytubefix download with {client_name} failed: {e}")
-                    continue
-            
-            if last_err: raise last_err
-
-        out_file = await loop.run_in_executor(None, _exec)
-        
-        # If we need MP3 we MUST convert with FFmpeg
-        if body.ext == "mp3" and FFMPEG_EXE:
-            job["status"] = "converting to mp3"
-            final_path = tmp_path.rsplit('.', 1)[0] + ".mp3"
-            cmd = [FFMPEG_EXE, "-i", out_file, "-vn", "-ab", "192k", "-ar", "44100", "-y", final_path]
-            subprocess.run(cmd, capture_output=True)
-            _cleanup(out_file)
-            job["path"] = final_path
-            job["ext"] = "mp3"
-        elif body.ext == "mp4" and not out_file.endswith(".mp4") and FFMPEG_EXE:
-            job["status"] = "converting to mp4"
-            final_path = tmp_path.rsplit('.', 1)[0] + ".mp4"
-            cmd = [FFMPEG_EXE, "-i", out_file, "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-y", final_path]
-            subprocess.run(cmd, capture_output=True)
-            _cleanup(out_file)
-            job["path"] = final_path
-            job["ext"] = "mp4"
-        else:
-            # Just rename to ensure it has an extension
-            actual_ext = os.path.splitext(out_file)[1] or f".{body.ext}"
-            final_path = tmp_path.rsplit('.', 1)[0] + actual_ext
-            if out_file != final_path:
-                os.replace(out_file, final_path)
-            job["path"] = final_path
-            job["ext"] = actual_ext.lstrip('.')
-
-        if job.get("path") and os.path.exists(job["path"]):
-            job["status"] = "completed"
-            job["progress"] = 100
-            logger.info(f"Job {job_id} completed via pytubefix: {job['path']}")
-        else:
-            job["status"] = "failed"
-            job["error"] = "File not found after pytube download"
-        
-    except Exception as e:
-        logger.exception(f"Pytubefix job {job_id} failed")
-        job["status"] = "failed"
-        job["error"] = str(e)
-        _cleanup(tmp_path)
 
 
 # ─── Legacy Route (Optional) ──────────────────────────────────────────────────
@@ -1072,49 +824,7 @@ def _resolve_output_path(tmp_path: str, suffix: str) -> str:
             return candidate
             
     return tmp_path
-async def _run_youget_download(job_id: str, body: DownloadJobRequest, tmp_path: str):
-    """Fallback download using you-get CLI."""
-    job = JOBS[job_id]
-    loop = asyncio.get_event_loop()
-    try:
-        def _exec():
-            # you-get -o <dir> -O <name> <url>
-            out_dir = os.path.dirname(tmp_path)
-            out_name = "youget_" + str(uuid.uuid4())
-            
-            cmd = [YOUGET_EXE, "--debug", "-o", out_dir, "-O", out_name, body.url]
-            
-            # Use cookies if available
-            if os.path.exists("cookies.txt"):
-                cmd.extend(["-c", os.path.abspath("cookies.txt")])
-                
-            logger.info(f"Running you-get download: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                logger.error(f"you-get failed: {result.stderr}")
-                raise Exception(f"you-get error: {result.stderr}")
 
-            # you-get might change the extension
-            for f in os.listdir(out_dir):
-                if f.startswith(out_name):
-                    return os.path.join(out_dir, f)
-            
-            raise Exception("File not found after you-get download")
-
-        final_path = await loop.run_in_executor(None, _exec)
-        
-        job["path"] = final_path
-        job["status"] = "completed"
-        job["progress"] = 100
-        job["ext"] = os.path.splitext(final_path)[1].lstrip('.') or body.ext
-        logger.info(f"Job {job_id} completed via you-get: {final_path}")
-
-    except Exception as e:
-        logger.exception(f"you-get job {job_id} failed")
-        job["status"] = "failed"
-        job["error"] = str(e)
-        _cleanup(tmp_path)
 
 async def _run_rapidapi_download(job_id: str, body: DownloadJobRequest, tmp_path: str):
     """Download using RapidAPI direct link extraction."""
