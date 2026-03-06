@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Optional
+import mimetypes
 from urllib.parse import quote
 
 import yt_dlp
@@ -132,6 +133,10 @@ def _build_ydl_opts(extra: dict | None = None) -> dict:
         "format_sort": ["res", "ext:mp4:m4a", "br", "asr"],
         "nocheckcertificate": True,
         "merge_output_format": "mp4",
+        "postprocessors": [{
+            "key": "FFmpegVideoConvertor",
+            "preferedformat": "mp4",
+        }]
     }
     
     # Use cookies.txt if provided in root
@@ -461,36 +466,25 @@ async def get_job_file(job_id: str):
     if not path or not os.path.exists(path):
          raise HTTPException(status_code=404, detail="File lost or deleted")
 
-    # Sanitize title to remove any problematic characters for headers
-    # We'll use a very safe character set for the primary filename
-    safe_title = "".join(c for c in job['title'] if ord(c) < 128 and c not in '\\/*?:"<>|')
-    if not safe_title.strip():
-        safe_title = "download"
-    
-    filename = f"{safe_title}.{job['ext']}"
-    # Modern browsers also support the 'filename*' parameter for UTF-8
+    # Sanitize title for filename
+    # Strip non-ASCII for the simple filename fallback to prevent header crashes
+    ascii_title = "".join(c if ord(c) < 128 else "_" for c in job['title'])
+    safe_name = _sanitize_filename(ascii_title) or "download"
     encoded_title = quote(job['title'])
-    utf8_filename = f"{encoded_title}.{job['ext']}"
     
-    import mimetypes
+    # MIME logic
     mime_type, _ = mimetypes.guess_type(path)
     if not mime_type:
         mime_type = "video/mp4" if job['ext'] == "mp4" else "application/octet-stream"
 
-    # Using Starlette's recommended way: filename for ASCII, filename* for UTF-8
-    # We combine them in one header.
-    content_disposition = f'attachment; filename="{filename}"; filename*=UTF-8\'\'{utf8_filename}'
+    # Standard-compliant Content-Disposition
+    cd_header = f'attachment; filename="{safe_name}.{job["ext"]}"; filename*=UTF-8\'\'{encoded_title}.{job["ext"]}'
 
-    try:
-        return FileResponse(
-            path, 
-            media_type=mime_type,
-            headers={"Content-Disposition": content_disposition}
-        )
-    except Exception as e:
-        logger.error(f"Error serving file: {e}")
-        # Absolute fallback: serve without custom headers, FastAPI will use defaults
-        return FileResponse(path, filename=filename, media_type=mime_type)
+    return FileResponse(
+        path, 
+        media_type=mime_type,
+        headers={"Content-Disposition": cd_header}
+    )
 
 
 async def _run_download_job(job_id: str, body: DownloadJobRequest):
@@ -549,13 +543,24 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
         
         await loop.run_in_executor(None, _exec)
         
+        
         actual_path = _resolve_output_path(tmp_path, suffix)
         if os.path.exists(actual_path):
+            # If requested MP4 but got something else, FORCE conversion
+            if body.ext == "mp4" and not actual_path.endswith(".mp4") and FFMPEG_EXE:
+                job["status"] = "converting to mp4"
+                mp4_path = actual_path.rsplit('.', 1)[0] + ".mp4_final"
+                cmd = [FFMPEG_EXE, "-i", actual_path, "-c:v", "copy", "-c:a", "aac", "-y", mp4_path]
+                subprocess.run(cmd, capture_output=True)
+                if os.path.exists(mp4_path):
+                    _cleanup(actual_path)
+                    actual_path = mp4_path.replace(".mp4_final", ".mp4")
+                    os.replace(mp4_path, actual_path)
+
             job["path"] = actual_path
             job["status"] = "completed"
             job["progress"] = 100
-            # Update extension in case yt-dlp changed it (e.g. mp4 -> mkv)
-            job["ext"] = os.path.splitext(actual_path)[1].lstrip('.') or body.ext
+            job["ext"] = os.path.splitext(actual_path)[1].lstrip('.')
             logger.info(f"Job {job_id} completed: {actual_path}")
         else:
             job["status"] = "failed"
@@ -590,18 +595,26 @@ async def _run_pytubefix_download(job_id: str, body: DownloadJobRequest, tmp_pat
             # If we need MP3 we MUST convert with FFmpeg
             if body.ext == "mp3" and FFMPEG_EXE:
                 job["status"] = "converting to mp3"
-                final_path = tmp_path # which already has .mp3 suffix
+                final_path = tmp_path.rsplit('.', 1)[0] + ".mp3"
                 cmd = [FFMPEG_EXE, "-i", out_file, "-vn", "-ab", "192k", "-ar", "44100", "-y", final_path]
                 subprocess.run(cmd, capture_output=True)
                 _cleanup(out_file)
                 job["path"] = final_path
                 job["ext"] = "mp3"
+            elif body.ext == "mp4" and not out_file.endswith(".mp4") and FFMPEG_EXE:
+                job["status"] = "converting to mp4"
+                final_path = tmp_path.rsplit('.', 1)[0] + ".mp4"
+                cmd = [FFMPEG_EXE, "-i", out_file, "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-y", final_path]
+                subprocess.run(cmd, capture_output=True)
+                _cleanup(out_file)
+                job["path"] = final_path
+                job["ext"] = "mp4"
             else:
-                # Just rename to the tmp_path which has the correct extension
-                # But we should ensure the extension matches what was downloaded
-                actual_ext = os.path.splitext(out_file)[1]
+                # Just rename to ensure it has an extension
+                actual_ext = os.path.splitext(out_file)[1] or f".{body.ext}"
                 final_path = tmp_path.rsplit('.', 1)[0] + actual_ext
-                os.replace(out_file, final_path)
+                if out_file != final_path:
+                    os.replace(out_file, final_path)
                 job["path"] = final_path
                 job["ext"] = actual_ext.lstrip('.')
 
