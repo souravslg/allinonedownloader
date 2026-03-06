@@ -460,20 +460,17 @@ async def get_job_file(job_id: str):
          raise HTTPException(status_code=404, detail="File lost or deleted")
 
     filename = f"{job['title']}.{job['ext']}"
-    encoded_filename = quote(filename)
     
     import mimetypes
     mime_type, _ = mimetypes.guess_type(path)
     if not mime_type:
         mime_type = "application/octet-stream"
 
+    # FastAPI's FileResponse handles filename encoding and Content-Disposition headers automatically
     return FileResponse(
         path, 
         filename=filename,
-        media_type=mime_type,
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"; filename*=UTF-8\'\'{encoded_filename}'
-        }
+        media_type=mime_type
     )
 
 
