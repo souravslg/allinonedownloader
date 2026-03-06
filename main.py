@@ -36,7 +36,9 @@ logger = logging.getLogger("viddl")
 FFMPEG_EXE: Optional[str] = None
 YOUGET_EXE: str = "you-get" # Default to 'you-get' assuming it's in PATH
 IS_KOYEB: bool = os.path.exists("/app") or "KOYEB" in os.environ
-RAPIDAPI_KEY: Optional[str] = os.environ.get("RAPIDAPI_KEY")
+# User provided specific RapidAPI Key
+RAPIDAPI_KEY: Optional[str] = os.environ.get("RAPIDAPI_KEY", "104f93455emsha4a8e06a6af7a46p155429jsn80530d8ea7a9")
+RAPIDAPI_HOST: str = "youtube138.p.rapidapi.com"
 
 def _init_binaries() -> bool:
     """Detect ffmpeg and you-get binaries and set their paths."""
@@ -475,28 +477,31 @@ async def fetch_metadata(body: FetchRequest):
                 
                 # FINAL FALLBACK: RapidAPI
                 if RAPIDAPI_KEY:
-                    logger.info("Trying RapidAPI fallback for metadata...")
+                    logger.info("Trying RapidAPI (youtube138) fallback for metadata...")
                     try:
                         video_id = _get_youtube_id(url)
                         headers = {
                             "X-RapidAPI-Key": RAPIDAPI_KEY,
-                            "X-RapidAPI-Host": "yt-downloader.p.rapidapi.com"
+                            "X-RapidAPI-Host": RAPIDAPI_HOST
                         }
-                        async with httpx.AsyncClient(timeout=10.0) as client:
-                            resp = await client.get("https://yt-downloader.p.rapidapi.com/v1/info", params={"id": video_id}, headers=headers)
+                        async with httpx.AsyncClient(timeout=15.0) as client:
+                            resp = await client.get(
+                                f"https://{RAPIDAPI_HOST}/video/details/", 
+                                params={"id": video_id}, 
+                                headers=headers
+                            )
                             data = resp.json()
                             if resp.status_code == 200:
                                 info = {
                                     "title": data.get("title", f"YouTube Video {video_id}"),
-                                    "thumbnail": data.get("thumbnail"),
-                                    "duration": int(data.get("duration", 0)),
-                                    "uploader": data.get("channel_name"),
-                                    "extractor_key": "youtube_rapidapi",
+                                    "thumbnail": data.get("thumbnails", [{}])[-1].get("url"),
+                                    "duration": int(data.get("lengthSeconds", 0)),
+                                    "uploader": data.get("author", {}).get("title"),
+                                    "extractor_key": f"{RAPIDAPI_HOST.split('.')[0]}",
                                     "webpage_url": url,
                                     "formats": [],
                                     "is_rapidapi": True
                                 }
-                                # Skip finding formats here, worker will do it
                                 formats = [
                                     {"format_id": "rapidapi_best", "label": "Best (RapidAPI)", "ext": "mp4", "type": "video"},
                                     {"format_id": "rapidapi_mp3", "label": "MP3 (RapidAPI)", "ext": "mp3", "type": "audio"},
@@ -507,7 +512,7 @@ async def fetch_metadata(body: FetchRequest):
                                     "thumbnail": info["thumbnail"],
                                     "duration": info["duration"],
                                     "channel": info["uploader"],
-                                    "platform": "youtube (rapidapi)",
+                                    "platform": f"youtube ({RAPIDAPI_HOST.split('.')[0]})",
                                     "webpage_url": url,
                                     "formats": formats
                                 })
@@ -1127,12 +1132,12 @@ async def _run_rapidapi_download(job_id: str, body: DownloadJobRequest, tmp_path
 
         headers = {
             "X-RapidAPI-Key": RAPIDAPI_KEY,
-            "X-RapidAPI-Host": "yt-downloader.p.rapidapi.com"
+            "X-RapidAPI-Host": RAPIDAPI_HOST
         }
         
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
-                "https://yt-downloader.p.rapidapi.com/v1/info", 
+                f"https://{RAPIDAPI_HOST}/video/streaming-data/", 
                 params={"id": video_id}, 
                 headers=headers
             )
@@ -1141,28 +1146,35 @@ async def _run_rapidapi_download(job_id: str, body: DownloadJobRequest, tmp_path
         if resp.status_code != 200:
             raise Exception(f"RapidAPI error: {data.get('message', 'Unknown error')}")
 
-        # RapidAPI returns formats in 'formats' or 'video'/'audio' keys
+        # youtube138 returns streamingData under streamingData or directly
+        sd = data.get('streamingData', {})
+        formats_list = sd.get('formats', []) + sd.get('adaptiveFormats', [])
+        
+        if not formats_list:
+            # Maybe it's top level?
+            formats_list = data.get('formats', []) + data.get('adaptiveFormats', [])
+
         download_url = None
         if body.format_id == "rapidapi_mp3":
-            # Search for adaptive audio in 'formats' list
+            # Best audio-only
             audio_formats = sorted(
-                [f for f in data.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none'],
-                key=lambda x: int(x.get('abr', 0) or 0),
+                [f for f in formats_list if 'audio' in f.get('mimeType', '').lower() and 'video' not in f.get('mimeType', '').lower()],
+                key=lambda x: int(x.get('bitrate', 0) or 0),
                 reverse=True
             )
             if audio_formats: download_url = audio_formats[0].get('url')
         else:
-            # Find best combined mp4
+            # Best combined video+audio
             video_formats = sorted(
-                [f for f in data.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4'],
+                [f for f in formats_list if 'video/mp4' in f.get('mimeType', '').lower() and f.get('url')],
                 key=lambda x: int(x.get('height', 0) or 0),
                 reverse=True
             )
             if video_formats: download_url = video_formats[0].get('url')
 
         if not download_url:
-            # Fallback to any valid url
-            for f in data.get('formats', []):
+            # Any valid url
+            for f in formats_list:
                 if f.get('url'):
                     download_url = f['url']
                     break
