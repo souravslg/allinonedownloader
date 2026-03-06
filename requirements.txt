@@ -6,3 +6,4 @@ aiofiles>=23.2.1
 imageio-ffmpeg>=0.4.9
 pytubefix>=8.12.0
 you-get>=0.4.1743
+httpx>=0.28.1

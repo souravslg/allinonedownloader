@@ -12,7 +12,9 @@ import sys
 import tempfile
 from typing import Optional
 import mimetypes
-from urllib.parse import quote
+import json
+import httpx
+from urllib.parse import quote, urlparse, parse_qs
 
 import yt_dlp
 from pytubefix import YouTube
@@ -34,6 +36,7 @@ logger = logging.getLogger("viddl")
 FFMPEG_EXE: Optional[str] = None
 YOUGET_EXE: str = "you-get" # Default to 'you-get' assuming it's in PATH
 IS_KOYEB: bool = os.path.exists("/app") or "KOYEB" in os.environ
+RAPIDAPI_KEY: Optional[str] = os.environ.get("RAPIDAPI_KEY")
 
 def _init_binaries() -> bool:
     """Detect ffmpeg and you-get binaries and set their paths."""
@@ -106,6 +109,18 @@ logger.info("FFmpeg available: %s", FFMPEG_AVAILABLE)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _get_youtube_id(url: str) -> Optional[str]:
+    """Extract video ID from a YouTube URL."""
+    parsed = urlparse(url)
+    if parsed.hostname in ('youtu.be', 'www.youtu.be'):
+        return parsed.path[1:]
+    if parsed.hostname in ('youtube.com', 'www.youtube.com'):
+        if parsed.path == '/watch':
+            return parse_qs(parsed.query).get('v', [None])[0]
+        if parsed.path.startswith(('/embed/', '/v/', '/shorts/')):
+            return parsed.path.split('/')[2]
+    return None
 
 def _sanitize_filename(name: str) -> str:
     """Remove characters that are illegal in filenames."""
@@ -457,11 +472,53 @@ async def fetch_metadata(body: FetchRequest):
                 info = await loop.run_in_executor(None, _pytube_extract)
             except Exception as pe:
                 logger.error("pytubefix also failed: %s", pe)
+                
+                # FINAL FALLBACK: RapidAPI
+                if RAPIDAPI_KEY:
+                    logger.info("Trying RapidAPI fallback for metadata...")
+                    try:
+                        video_id = _get_youtube_id(url)
+                        headers = {
+                            "X-RapidAPI-Key": RAPIDAPI_KEY,
+                            "X-RapidAPI-Host": "yt-downloader.p.rapidapi.com"
+                        }
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            resp = await client.get("https://yt-downloader.p.rapidapi.com/v1/info", params={"id": video_id}, headers=headers)
+                            data = resp.json()
+                            if resp.status_code == 200:
+                                info = {
+                                    "title": data.get("title", f"YouTube Video {video_id}"),
+                                    "thumbnail": data.get("thumbnail"),
+                                    "duration": int(data.get("duration", 0)),
+                                    "uploader": data.get("channel_name"),
+                                    "extractor_key": "youtube_rapidapi",
+                                    "webpage_url": url,
+                                    "formats": [],
+                                    "is_rapidapi": True
+                                }
+                                # Skip finding formats here, worker will do it
+                                formats = [
+                                    {"format_id": "rapidapi_best", "label": "Best (RapidAPI)", "ext": "mp4", "type": "video"},
+                                    {"format_id": "rapidapi_mp3", "label": "MP3 (RapidAPI)", "ext": "mp3", "type": "audio"},
+                                ]
+                                return JSONResponse({
+                                    "type": "video",
+                                    "title": info["title"],
+                                    "thumbnail": info["thumbnail"],
+                                    "duration": info["duration"],
+                                    "channel": info["uploader"],
+                                    "platform": "youtube (rapidapi)",
+                                    "webpage_url": url,
+                                    "formats": formats
+                                })
+                    except Exception as ree:
+                        logger.error(f"RapidAPI fallback failed: {ree}")
+
                 # Provide a more helpful message for Koyeb users
                 error_msg = str(e) if "Sign in to confirm" in str(e) else str(pe)
                 raise HTTPException(
                     status_code=422, 
-                    detail=f"YouTube is blocking this server IP. Try adding YOUTUBE_PO_TOKEN and YOUTUBE_VISITOR_DATA to environment variables. (Error: {error_msg})"
+                    detail=f"YouTube is blocking this server IP. Try adding YOUTUBE_PO_TOKEN or RAPIDAPI_KEY to environment variables. (Error: {error_msg})"
                 )
         else:
             logger.error("yt-dlp error: %s", e)
@@ -515,6 +572,11 @@ async def fetch_metadata(body: FetchRequest):
                 raise HTTPException(status_code=422, detail=f"Could not retrieve format list: {str(e)}")
 
         formats = _pick_formats(info)
+        
+        # Inject RapidAPI options if key is present
+        if RAPIDAPI_KEY and _is_youtube(url):
+            formats.append({"format_id": "rapidapi_best", "label": "Best (RapidAPI)", "ext": "mp4", "type": "video"})
+            formats.append({"format_id": "rapidapi_mp3", "label": "MP3 (RapidAPI)", "ext": "mp3", "type": "audio"})
 
     # Pick best thumbnail
     thumbnails = info.get("thumbnails") or []
@@ -624,6 +686,11 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
     tmp_path = tmp.name
     tmp.close()
     
+    # If format_id starts with rapidapi_, use RapidAPI worker
+    if body.format_id.startswith("rapidapi_"):
+        await _run_rapidapi_download(job_id, body, tmp_path)
+        return
+
     # If format_id starts with youget_, use you-get worker
     if body.format_id.startswith("youget_"):
         await _run_youget_download(job_id, body, tmp_path)
@@ -1040,6 +1107,99 @@ async def _run_youget_download(job_id: str, body: DownloadJobRequest, tmp_path: 
 
     except Exception as e:
         logger.exception(f"you-get job {job_id} failed")
+        job["status"] = "failed"
+        job["error"] = str(e)
+        _cleanup(tmp_path)
+
+async def _run_rapidapi_download(job_id: str, body: DownloadJobRequest, tmp_path: str):
+    """Download using RapidAPI direct link extraction."""
+    job = JOBS[job_id]
+    if not RAPIDAPI_KEY:
+        job["status"] = "failed"
+        job["error"] = "RapidAPI key not configured"
+        return
+
+    try:
+        job["status"] = "fetching direct link"
+        video_id = _get_youtube_id(body.url)
+        if not video_id:
+            raise Exception("Could not extract YouTube ID")
+
+        headers = {
+            "X-RapidAPI-Key": RAPIDAPI_KEY,
+            "X-RapidAPI-Host": "yt-downloader.p.rapidapi.com"
+        }
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                "https://yt-downloader.p.rapidapi.com/v1/info", 
+                params={"id": video_id}, 
+                headers=headers
+            )
+            data = resp.json()
+            
+        if resp.status_code != 200:
+            raise Exception(f"RapidAPI error: {data.get('message', 'Unknown error')}")
+
+        # RapidAPI returns formats in 'formats' or 'video'/'audio' keys
+        download_url = None
+        if body.format_id == "rapidapi_mp3":
+            # Search for adaptive audio in 'formats' list
+            audio_formats = sorted(
+                [f for f in data.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none'],
+                key=lambda x: int(x.get('abr', 0) or 0),
+                reverse=True
+            )
+            if audio_formats: download_url = audio_formats[0].get('url')
+        else:
+            # Find best combined mp4
+            video_formats = sorted(
+                [f for f in data.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4'],
+                key=lambda x: int(x.get('height', 0) or 0),
+                reverse=True
+            )
+            if video_formats: download_url = video_formats[0].get('url')
+
+        if not download_url:
+            # Fallback to any valid url
+            for f in data.get('formats', []):
+                if f.get('url'):
+                    download_url = f['url']
+                    break
+        
+        if not download_url:
+            raise Exception("No download URL found in RapidAPI response")
+
+        job["status"] = "downloading from cdn"
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            async with client.stream("GET", download_url) as response:
+                total = int(response.headers.get("Content-Length", 0))
+                downloaded = 0
+                with open(tmp_path, "wb") as f:
+                    async for chunk in response.aiter_bytes():
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total > 0:
+                            job["progress"] = int((downloaded / total) * 100)
+
+        # Post-process (conversion) if needed
+        if body.ext == "mp3" and FFMPEG_EXE:
+            job["status"] = "converting to mp3"
+            final_path = tmp_path.rsplit('.', 1)[0] + ".mp3"
+            cmd = [FFMPEG_EXE, "-i", tmp_path, "-vn", "-ab", "192k", "-ar", "44100", "-y", final_path]
+            subprocess.run(cmd, capture_output=True)
+            _cleanup(tmp_path)
+            job["path"] = final_path
+            job["ext"] = "mp3"
+        else:
+            job["path"] = tmp_path
+        
+        job["status"] = "completed"
+        job["progress"] = 100
+        logger.info(f"Job {job_id} completed via RapidAPI: {job['path']}")
+
+    except Exception as e:
+        logger.exception(f"RapidAPI job {job_id} failed")
         job["status"] = "failed"
         job["error"] = str(e)
         _cleanup(tmp_path)
