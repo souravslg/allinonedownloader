@@ -460,17 +460,21 @@ async def get_job_file(job_id: str):
          raise HTTPException(status_code=404, detail="File lost or deleted")
 
     filename = f"{job['title']}.{job['ext']}"
+    encoded_filename = quote(filename)
     
     import mimetypes
     mime_type, _ = mimetypes.guess_type(path)
     if not mime_type:
         mime_type = "application/octet-stream"
 
-    # FastAPI's FileResponse handles filename encoding and Content-Disposition headers automatically
+    # We set Content-Disposition manually to support UTF-8 filenames (like Bangla/Hindi)
+    # Using the RFC 5987 standard (filename*=UTF-8'')
     return FileResponse(
         path, 
-        filename=filename,
-        media_type=mime_type
+        media_type=mime_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+        }
     )
 
 
@@ -576,6 +580,7 @@ async def _run_pytubefix_download(job_id: str, body: DownloadJobRequest, tmp_pat
                 subprocess.run(cmd, capture_output=True)
                 _cleanup(out_file)
                 job["path"] = final_path
+                job["ext"] = "mp3"
             else:
                 # Just rename to the tmp_path which has the correct extension
                 # But we should ensure the extension matches what was downloaded
