@@ -311,9 +311,9 @@ async def fetch_metadata(body: FetchRequest):
     loop = asyncio.get_event_loop()
 
     # ── Koyeb Force YouTube Fix ──────────────────────────────────────────────
-    # Data center IPs are often blocked by yt-dlp. Force pytubefix primary on Koyeb.
-    if IS_KOYEB and _is_youtube(url):
-        logger.info("Running on Koyeb: Forcing pytubefix for YouTube metadata")
+    # Data center IPs are blocked by yt-dlp. Force pytubefix on Koyeb UNLESS cookies are present.
+    if IS_KOYEB and _is_youtube(url) and not os.path.exists("cookies.txt"):
+        logger.info("Running on Koyeb without cookies: Forcing pytubefix for YouTube")
         try:
             def _pytube_extract():
                 # MWEB or WEB_EMBED usually work better on server IPs
