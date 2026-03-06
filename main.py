@@ -461,28 +461,36 @@ async def get_job_file(job_id: str):
     if not path or not os.path.exists(path):
          raise HTTPException(status_code=404, detail="File lost or deleted")
 
-    filename = f"{job['title']}.{job['ext']}"
-    # ASCII-only fallback for safe headers
-    fallback_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in filename)
-    if not fallback_name or fallback_name.startswith('.'):
-        fallback_name = f"download.{job['ext']}"
-        
-    encoded_filename = quote(filename)
+    # Sanitize title to remove any problematic characters for headers
+    # We'll use a very safe character set for the primary filename
+    safe_title = "".join(c for c in job['title'] if ord(c) < 128 and c not in '\\/*?:"<>|')
+    if not safe_title.strip():
+        safe_title = "download"
+    
+    filename = f"{safe_title}.{job['ext']}"
+    # Modern browsers also support the 'filename*' parameter for UTF-8
+    encoded_title = quote(job['title'])
+    utf8_filename = f"{encoded_title}.{job['ext']}"
     
     import mimetypes
     mime_type, _ = mimetypes.guess_type(path)
     if not mime_type:
         mime_type = "video/mp4" if job['ext'] == "mp4" else "application/octet-stream"
 
-    # RFC 6266 / RFC 5987 compliant Content-Disposition
-    # filename= is for old browsers (ASCII only), filename*= is for modern ones (UTF-8)
-    cd_header = f'attachment; filename="{fallback_name}"; filename*=UTF-8\'\'{encoded_filename}'
-    
-    return FileResponse(
-        path, 
-        media_type=mime_type,
-        headers={"Content-Disposition": cd_header}
-    )
+    # Using Starlette's recommended way: filename for ASCII, filename* for UTF-8
+    # We combine them in one header.
+    content_disposition = f'attachment; filename="{filename}"; filename*=UTF-8\'\'{utf8_filename}'
+
+    try:
+        return FileResponse(
+            path, 
+            media_type=mime_type,
+            headers={"Content-Disposition": content_disposition}
+        )
+    except Exception as e:
+        logger.error(f"Error serving file: {e}")
+        # Absolute fallback: serve without custom headers, FastAPI will use defaults
+        return FileResponse(path, filename=filename, media_type=mime_type)
 
 
 async def _run_download_job(job_id: str, body: DownloadJobRequest):
