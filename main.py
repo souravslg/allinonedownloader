@@ -318,13 +318,25 @@ async def fetch_metadata(body: FetchRequest):
             def _pytube_extract():
                 # MWEB or WEB_EMBED usually work better on server IPs
                 po_token = os.environ.get('YOUTUBE_PO_TOKEN')
+                visitor_data = os.environ.get('YOUTUBE_VISITOR_DATA')
+                
+                token_file = None
+                if po_token and visitor_data:
+                    try:
+                        tfile = tempfile.NamedTemporaryFile(suffix='.json', mode='w', delete=False)
+                        json.dump({"visitorData": visitor_data, "poToken": po_token}, tfile)
+                        tfile.close()
+                        token_file = tfile.name
+                    except:
+                        pass
+
                 yt = YouTube(
                     url, 
                     client='MWEB',
-                    use_po_token=True if po_token else False,
-                    po_token=po_token
+                    use_po_token=True if token_file else False,
+                    token_file=token_file
                 )
-                return {
+                res = {
                     "title": yt.title,
                     "thumbnail": yt.thumbnail_url,
                     "duration": yt.length,
@@ -334,6 +346,10 @@ async def fetch_metadata(body: FetchRequest):
                     "formats": [], 
                     "is_pytubefix": True
                 }
+                if token_file:
+                    try: os.unlink(token_file)
+                    except: pass
+                return res
             info = await loop.run_in_executor(None, _pytube_extract)
             # Skip to specialized format picker
             formats = [
@@ -384,21 +400,37 @@ async def fetch_metadata(body: FetchRequest):
                     
                     for client_name in clients:
                         try:
-                            # PO Token integration for pytubefix
-                            # Some clients (like MWEB) require po_token on data centers
+                            # PO Token integration for pytubefix via file-based bypass
                             po_token = os.environ.get('YOUTUBE_PO_TOKEN')
+                            visitor_data = os.environ.get('YOUTUBE_VISITOR_DATA')
                             
+                            token_file = None
+                            if po_token and visitor_data:
+                                # Create a temporary token file as pytubefix doesn't take raw token in __init__
+                                try:
+                                    tfile = tempfile.NamedTemporaryFile(suffix='.json', mode='w', delete=False)
+                                    json.dump({"visitorData": visitor_data, "poToken": po_token}, tfile)
+                                    tfile.close()
+                                    token_file = tfile.name
+                                except:
+                                    pass
+
                             yt = YouTube(
                                 url, 
                                 client=client_name,
-                                use_po_token=True if po_token else False,
-                                po_token=po_token,
+                                use_po_token=True if token_file else False,
+                                token_file=token_file,
                                 use_oauth=False,
                                 allow_oauth_cache=False
                             )
                             
                             # Force access to title to trigger network request
                             _ = yt.title 
+                            
+                            # Cleanup token file after use
+                            if token_file:
+                                try: os.unlink(token_file)
+                                except: pass
                             
                             return {
                                 "title": yt.title,
@@ -682,15 +714,24 @@ async def _run_pytubefix_download(job_id: str, body: DownloadJobRequest, tmp_pat
             
             # PO Token for download
             po_token = os.environ.get('YOUTUBE_PO_TOKEN')
+            visitor_data = os.environ.get('YOUTUBE_VISITOR_DATA')
             
             for client_name in clients:
+                token_file = None
                 try:
+                    if po_token and visitor_data:
+                        tfile = tempfile.NamedTemporaryFile(suffix='.json', mode='w', delete=False)
+                        json.dump({"visitorData": visitor_data, "poToken": po_token}, tfile)
+                        tfile.close()
+                        token_file = tfile.name
+
                     yt = YouTube(
                         body.url, 
                         client=client_name,
-                        use_po_token=True if po_token else False,
-                        po_token=po_token
+                        use_po_token=True if token_file else False,
+                        token_file=token_file
                     )
+                    
                     if body.format_id == "pytubefix_720p":
                         stream = yt.streams.filter(res="720p", file_extension="mp4").first() or yt.streams.get_highest_resolution()
                     elif body.format_id == "pytubefix_360p":
@@ -702,8 +743,17 @@ async def _run_pytubefix_download(job_id: str, body: DownloadJobRequest, tmp_pat
                         raise Exception(f"No stream found with client {client_name}")
                         
                     out_file = stream.download(output_path=os.path.dirname(tmp_path))
+                    
+                    # Cleanup
+                    if token_file:
+                        try: os.unlink(token_file)
+                        except: pass
+                        
                     return out_file # Success
                 except Exception as e:
+                    if token_file:
+                        try: os.unlink(token_file)
+                        except: pass
                     last_err = e
                     logger.warn(f"Pytubefix download with {client_name} failed: {e}")
                     continue
