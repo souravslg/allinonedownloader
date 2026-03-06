@@ -103,11 +103,22 @@ def _build_ydl_opts(extra: dict | None = None) -> dict:
             "tiktok": {
                 "api_hostname": ["api22-normal-c-useast2a.tiktokv.com"],
                 "app_version": ["20.9.3"],
+            },
+            # YouTube: Bypass bot detection using PO Token and Visitor Data if provided
+            "youtube": {
+                "player_client": ["android", "ios", "web", "mweb"],
+                "po_token": [f"web+{os.environ.get('YOUTUBE_PO_TOKEN', '')}"] if os.environ.get('YOUTUBE_PO_TOKEN') else [],
+                "visitor_data": [os.environ.get('YOUTUBE_VISITOR_DATA', '')] if os.environ.get('YOUTUBE_VISITOR_DATA') else [],
             }
         },
         # Prefer HTTP(S) sources, skip DRM-protected formats
         "format_sort": ["res", "ext:mp4:m4a", "br", "asr"],
     }
+    
+    # Use cookies.txt if provided in root
+    if os.path.exists("cookies.txt"):
+        opts["cookiefile"] = "cookies.txt"
+        logger.info("Using cookies.txt for authentication")
     if extra:
         opts.update(extra)
     return opts
