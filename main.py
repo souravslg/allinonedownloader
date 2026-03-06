@@ -462,9 +462,15 @@ async def get_job_file(job_id: str):
     filename = f"{job['title']}.{job['ext']}"
     encoded_filename = quote(filename)
     
+    import mimetypes
+    mime_type, _ = mimetypes.guess_type(path)
+    if not mime_type:
+        mime_type = "application/octet-stream"
+
     return FileResponse(
         path, 
         filename=filename,
+        media_type=mime_type,
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"; filename*=UTF-8\'\'{encoded_filename}'
         }
@@ -532,6 +538,8 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
             job["path"] = actual_path
             job["status"] = "completed"
             job["progress"] = 100
+            # Update extension in case yt-dlp changed it (e.g. mp4 -> mkv)
+            job["ext"] = os.path.splitext(actual_path)[1].lstrip('.') or body.ext
             logger.info(f"Job {job_id} completed: {actual_path}")
         else:
             job["status"] = "failed"
@@ -560,16 +568,35 @@ async def _run_pytubefix_download(job_id: str, body: DownloadJobRequest, tmp_pat
             else:
                 stream = yt.streams.get_audio_only()
             
-            # Pytube downloads to a filename, we move it to tmp_path
+            # Pytube downloads to a filename
             out_file = stream.download(output_path=os.path.dirname(tmp_path))
-            os.replace(out_file, tmp_path)
+            
+            # If we need MP3 we MUST convert with FFmpeg
+            if body.ext == "mp3" and FFMPEG_EXE:
+                job["status"] = "converting to mp3"
+                final_path = tmp_path # which already has .mp3 suffix
+                cmd = [FFMPEG_EXE, "-i", out_file, "-vn", "-ab", "192k", "-ar", "44100", "-y", final_path]
+                subprocess.run(cmd, capture_output=True)
+                _cleanup(out_file)
+                job["path"] = final_path
+            else:
+                # Just rename to the tmp_path which has the correct extension
+                # But we should ensure the extension matches what was downloaded
+                actual_ext = os.path.splitext(out_file)[1]
+                final_path = tmp_path.rsplit('.', 1)[0] + actual_ext
+                os.replace(out_file, final_path)
+                job["path"] = final_path
+                job["ext"] = actual_ext.lstrip('.')
 
         await loop.run_in_executor(None, _exec)
         
-        job["path"] = tmp_path
-        job["status"] = "completed"
-        job["progress"] = 100
-        logger.info(f"Job {job_id} completed via pytubefix: {tmp_path}")
+        if job.get("path") and os.path.exists(job["path"]):
+            job["status"] = "completed"
+            job["progress"] = 100
+            logger.info(f"Job {job_id} completed via pytubefix: {job['path']}")
+        else:
+            job["status"] = "failed"
+            job["error"] = "File not found after pytube download"
         
     except Exception as e:
         logger.exception(f"Pytubefix job {job_id} failed")
