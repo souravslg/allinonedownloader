@@ -130,6 +130,8 @@ def _build_ydl_opts(extra: dict | None = None) -> dict:
         },
         # Prefer HTTP(S) sources, skip DRM-protected formats
         "format_sort": ["res", "ext:mp4:m4a", "br", "asr"],
+        "nocheckcertificate": True,
+        "merge_output_format": "mp4",
     }
     
     # Use cookies.txt if provided in root
@@ -460,21 +462,26 @@ async def get_job_file(job_id: str):
          raise HTTPException(status_code=404, detail="File lost or deleted")
 
     filename = f"{job['title']}.{job['ext']}"
+    # ASCII-only fallback for safe headers
+    fallback_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in filename)
+    if not fallback_name or fallback_name.startswith('.'):
+        fallback_name = f"download.{job['ext']}"
+        
     encoded_filename = quote(filename)
     
     import mimetypes
     mime_type, _ = mimetypes.guess_type(path)
     if not mime_type:
-        mime_type = "application/octet-stream"
+        mime_type = "video/mp4" if job['ext'] == "mp4" else "application/octet-stream"
 
-    # We set Content-Disposition manually to support UTF-8 filenames (like Bangla/Hindi)
-    # Using the RFC 5987 standard (filename*=UTF-8'')
+    # RFC 6266 / RFC 5987 compliant Content-Disposition
+    # filename= is for old browsers (ASCII only), filename*= is for modern ones (UTF-8)
+    cd_header = f'attachment; filename="{fallback_name}"; filename*=UTF-8\'\'{encoded_filename}'
+    
     return FileResponse(
         path, 
         media_type=mime_type,
-        headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
-        }
+        headers={"Content-Disposition": cd_header}
     )
 
 
