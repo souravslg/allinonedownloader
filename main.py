@@ -30,40 +30,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger("viddl")
 
-# ─── Environment ─────────────────────────────────────────────────────────────
+# ─── Downloader Binaries ───────────────────────────────────────────────────
 FFMPEG_EXE: Optional[str] = None
+YOUGET_EXE: str = "you-get" # Default to 'you-get' assuming it's in PATH
 IS_KOYEB: bool = os.path.exists("/app") or "KOYEB" in os.environ
 
-def _init_ffmpeg() -> bool:
-    """Detect ffmpeg and return True if found, False otherwise."""
-    global FFMPEG_EXE
-    # 1. Try system PATH (standard 'ffmpeg')
+def _init_binaries() -> bool:
+    """Detect ffmpeg and you-get binaries and set their paths."""
+    global FFMPEG_EXE, YOUGET_EXE
+
+    # 1. FFmpeg detection
+    found_ffmpeg = False
     try:
-        subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=3)
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=3, check=True)
         FFMPEG_EXE = "ffmpeg"
         logger.info("Using system ffmpeg")
-        return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        found_ffmpeg = True
+    except (FileNotFoundError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+        # 2. Try imageio-ffmpeg bundled binary
+        try:
+            import imageio_ffmpeg
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+            if os.path.exists(exe):
+                FFMPEG_EXE = exe
+                logger.info("Found bundled ffmpeg: %s", exe)
+                ffmpeg_dir = os.path.dirname(exe)
+                os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+                found_ffmpeg = True
+        except (ImportError, Exception):
+            pass
 
-    # 2. Try imageio-ffmpeg bundled binary
-    try:
-        import imageio_ffmpeg
-        exe = imageio_ffmpeg.get_ffmpeg_exe()
-        if os.path.exists(exe):
-            FFMPEG_EXE = exe
-            logger.info("Found bundled ffmpeg: %s", exe)
-            # Prepend to PATH so yt-dlp internals and other calls can find it
-            ffmpeg_dir = os.path.dirname(exe)
-            os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
-            return True
-    except (ImportError, Exception) as e:
-        logger.debug("imageio-ffmpeg check failed: %s", e)
+    # 3. you-get detection
+    if sys.platform == "win32":
+        venv_youget = os.path.join(os.getcwd(), ".venv", "Scripts", "you-get.exe")
+        if os.path.exists(venv_youget):
+            YOUGET_EXE = venv_youget
+    
+    logger.info(f"Binaries initialized: FFmpeg={FFMPEG_EXE}, you-get={YOUGET_EXE}")
+    return found_ffmpeg
 
-    logger.warning("FFmpeg NOT found. High-quality merges and MP3 conversion will be disabled.")
-    return False
-
-FFMPEG_AVAILABLE: bool = _init_ffmpeg()
+FFMPEG_AVAILABLE: bool = _init_binaries()
 
 
 # ─── App Setup ────────────────────────────────────────────────────────────────
@@ -357,6 +363,7 @@ async def fetch_metadata(body: FetchRequest):
                 {"format_id": "pytubefix_720p", "label": "720p (Pytube)", "ext": "mp4", "type": "video", "needs_merge": False},
                 {"format_id": "pytubefix_360p", "label": "360p (Pytube)", "ext": "mp4", "type": "video", "needs_merge": False},
                 {"format_id": "pytubefix_audio", "label": "Audio (Pytube)", "ext": "m4a", "type": "audio"},
+                {"format_id": "youget_best", "label": "Best (you-get)", "ext": "mp4", "type": "video"},
             ]
             return JSONResponse({
                 "type": "video",
@@ -617,6 +624,11 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
     tmp_path = tmp.name
     tmp.close()
     
+    # If format_id starts with youget_, use you-get worker
+    if body.format_id.startswith("youget_"):
+        await _run_youget_download(job_id, body, tmp_path)
+        return
+
     # If format_id starts with pytubefix_, use pytubefix worker
     if body.format_id.startswith("pytubefix_"):
         await _run_pytubefix_download(job_id, body, tmp_path)
@@ -988,3 +1000,46 @@ def _resolve_output_path(tmp_path: str, suffix: str) -> str:
             return candidate
             
     return tmp_path
+async def _run_youget_download(job_id: str, body: DownloadJobRequest, tmp_path: str):
+    """Fallback download using you-get CLI."""
+    job = JOBS[job_id]
+    loop = asyncio.get_event_loop()
+    try:
+        def _exec():
+            # you-get -o <dir> -O <name> <url>
+            out_dir = os.path.dirname(tmp_path)
+            out_name = "youget_" + str(uuid.uuid4())
+            
+            cmd = [YOUGET_EXE, "--debug", "-o", out_dir, "-O", out_name, body.url]
+            
+            # Use cookies if available
+            if os.path.exists("cookies.txt"):
+                cmd.extend(["-c", os.path.abspath("cookies.txt")])
+                
+            logger.info(f"Running you-get download: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                logger.error(f"you-get failed: {result.stderr}")
+                raise Exception(f"you-get error: {result.stderr}")
+
+            # you-get might change the extension
+            for f in os.listdir(out_dir):
+                if f.startswith(out_name):
+                    return os.path.join(out_dir, f)
+            
+            raise Exception("File not found after you-get download")
+
+        final_path = await loop.run_in_executor(None, _exec)
+        
+        job["path"] = final_path
+        job["status"] = "completed"
+        job["progress"] = 100
+        job["ext"] = os.path.splitext(final_path)[1].lstrip('.') or body.ext
+        logger.info(f"Job {job_id} completed via you-get: {final_path}")
+
+    except Exception as e:
+        logger.exception(f"you-get job {job_id} failed")
+        job["status"] = "failed"
+        job["error"] = str(e)
+        _cleanup(tmp_path)
