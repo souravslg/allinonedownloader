@@ -395,31 +395,28 @@ async def fetch_metadata(body: FetchRequest):
             logger.info("yt-dlp failed for YouTube: %s. Trying pytubefix fallback...", e)
             try:
                 def _pytube_extract():
-                    # Try MWEB first as it's often more permissive on server IPs
-                    clients = ['MWEB', 'WEB_EMBED', 'ANDROID_VR', 'IOS']
+                    # 'WEB' client supports automatic PO Token generation via Node.js
+                    clients = ['WEB', 'MWEB', 'WEB_EMBED', 'ANDROID_VR', 'IOS']
                     last_err = None
                     
                     for client_name in clients:
                         try:
-                            # PO Token integration for pytubefix via file-based bypass
                             po_token = os.environ.get('YOUTUBE_PO_TOKEN')
                             visitor_data = os.environ.get('YOUTUBE_VISITOR_DATA')
                             
                             token_file = None
                             if po_token and visitor_data:
-                                # Create a temporary token file as pytubefix doesn't take raw token in __init__
                                 try:
                                     tfile = tempfile.NamedTemporaryFile(suffix='.json', mode='w', delete=False)
                                     json.dump({"visitorData": visitor_data, "poToken": po_token}, tfile)
                                     tfile.close()
                                     token_file = tfile.name
-                                except:
-                                    pass
+                                except: pass
 
                             yt = YouTube(
                                 url, 
                                 client=client_name,
-                                use_po_token=True if token_file else False,
+                                use_po_token=True, # Always True to allow auto-generation fallback
                                 token_file=token_file,
                                 use_oauth=False,
                                 allow_oauth_cache=False
