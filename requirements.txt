@@ -4,3 +4,4 @@ yt-dlp>=2024.5.1
 python-multipart>=0.0.9
 aiofiles>=23.2.1
 imageio-ffmpeg>=0.4.9
+pytubefix>=8.12.0

@@ -14,9 +14,11 @@ from typing import Optional
 from urllib.parse import quote
 
 import yt_dlp
-from fastapi import FastAPI, HTTPException, Query
+from pytubefix import YouTube
+import uuid
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -80,6 +82,16 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 class FetchRequest(BaseModel):
     url: str
 
+class DownloadJobRequest(BaseModel):
+    url: str
+    format_id: str
+    ext: str
+    title: Optional[str] = None
+
+# ─── Job Registry ─────────────────────────────────────────────────────────────
+# Stores job state: { job_id: { status, progress, title, ext, path, error } }
+JOBS: dict[str, dict] = {}
+
 
 # FFmpeg detection already performed above
 logger.info("FFmpeg available: %s", FFMPEG_AVAILABLE)
@@ -90,6 +102,11 @@ logger.info("FFmpeg available: %s", FFMPEG_AVAILABLE)
 def _sanitize_filename(name: str) -> str:
     """Remove characters that are illegal in filenames."""
     return re.sub(r'[\\/*?:"<>|]', "_", name)
+
+
+def _is_youtube(url: str) -> bool:
+    """Return True if the URL is from YouTube."""
+    return "youtube.com" in url or "youtu.be" in url
 
 
 def _build_ydl_opts(extra: dict | None = None) -> dict:
@@ -288,12 +305,30 @@ async def fetch_metadata(body: FetchRequest):
 
     try:
         info = await loop.run_in_executor(None, _extract)
-    except yt_dlp.utils.DownloadError as e:
-        logger.error("yt-dlp error: %s", e)
-        raise HTTPException(status_code=422, detail=f"Could not process URL: {str(e)}")
     except Exception as e:
-        logger.exception("Unexpected error during metadata fetch")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        # If YouTube, try pytubefix as fallback
+        if _is_youtube(url):
+            logger.info("yt-dlp failed for YouTube, trying pytubefix fallback...")
+            try:
+                def _pytube_extract():
+                    yt = YouTube(url)
+                    return {
+                        "title": yt.title,
+                        "thumbnail": yt.thumbnail_url,
+                        "duration": yt.length,
+                        "uploader": yt.author,
+                        "extractor_key": "youtube",
+                        "webpage_url": url,
+                        "formats": [], # Simplified for fallback
+                        "is_pytubefix": True
+                    }
+                info = await loop.run_in_executor(None, _pytube_extract)
+            except Exception as pe:
+                logger.error("pytubefix also failed: %s", pe)
+                raise HTTPException(status_code=422, detail=f"YouTube access blocked: {str(e)}")
+        else:
+            logger.error("yt-dlp error: %s", e)
+            raise HTTPException(status_code=422, detail=f"Could not process URL: {str(e)}")
 
     # ── Playlist ──────────────────────────────────────────────────────────────
     if info.get("_type") == "playlist":
@@ -323,18 +358,26 @@ async def fetch_metadata(body: FetchRequest):
         )
 
     # ── Single video ──────────────────────────────────────────────────────────
-    # Re-extract with full format info if we only got a flat entry
-    if "formats" not in info:
-        full_opts = _build_ydl_opts({"skip_download": True})
-        actual_url = info.get("webpage_url") or url
-        try:
-            info = await loop.run_in_executor(
-                None, lambda: yt_dlp.YoutubeDL(full_opts).extract_info(actual_url, download=False)
-            )
-        except Exception as e:
-            raise HTTPException(status_code=422, detail=f"Could not retrieve format list: {str(e)}")
+    if info.get("is_pytubefix"):
+        # Custom format list for pytubefix
+        formats = [
+            {"format_id": "pytubefix_720p", "label": "720p (Pytube)", "ext": "mp4", "type": "video", "needs_merge": False},
+            {"format_id": "pytubefix_360p", "label": "360p (Pytube)", "ext": "mp4", "type": "video", "needs_merge": False},
+            {"format_id": "pytubefix_audio", "label": "Audio (Pytube)", "ext": "m4a", "type": "audio"},
+        ]
+    else:
+        # Re-extract with full format info if we only got a flat entry
+        if "formats" not in info:
+            full_opts = _build_ydl_opts({"skip_download": True})
+            actual_url = info.get("webpage_url") or url
+            try:
+                info = await loop.run_in_executor(
+                    None, lambda: yt_dlp.YoutubeDL(full_opts).extract_info(actual_url, download=False)
+                )
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=f"Could not retrieve format list: {str(e)}")
 
-    formats = _pick_formats(info)
+        formats = _pick_formats(info)
 
     # Pick best thumbnail
     thumbnails = info.get("thumbnails") or []
@@ -363,8 +406,181 @@ async def fetch_metadata(body: FetchRequest):
     )
 
 
-@app.get("/api/download", tags=["Downloader"])
-async def download_video(
+@app.post("/api/download/request", tags=["Downloader"])
+async def request_download(body: DownloadJobRequest, background_tasks: BackgroundTasks):
+    """
+    Create a background download job and return a Job ID.
+    Follows the downbot.app architecture for better UX.
+    """
+    job_id = str(uuid.uuid4())
+    safe_title = _sanitize_filename(body.title or "download")
+    
+    JOBS[job_id] = {
+        "status": "queued",
+        "progress": 0,
+        "title": safe_title,
+        "ext": body.ext,
+        "path": None,
+        "error": None,
+        "created_at": asyncio.get_event_loop().time()
+    }
+    
+    background_tasks.add_task(_run_download_job, job_id, body)
+    return {"jobId": job_id}
+
+
+@app.get("/api/download/status/{job_id}", tags=["Downloader"])
+async def get_job_status(job_id: str):
+    """Check the status and progress of a background job."""
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return {
+        "jobId": job_id,
+        "status": job["status"],
+        "progress": job["progress"],
+        "error": job["error"],
+        "metadata": {
+            "title": job["title"],
+            "ext": job["ext"]
+        }
+    }
+
+
+@app.get("/api/download/file/{job_id}", tags=["Downloader"])
+async def get_job_file(job_id: str):
+    """Download the completed file for a given job ID."""
+    job = JOBS.get(job_id)
+    if not job or job["status"] != "completed":
+        raise HTTPException(status_code=404, detail="File not ready or job not found")
+    
+    path = job["path"]
+    if not path or not os.path.exists(path):
+         raise HTTPException(status_code=404, detail="File lost or deleted")
+
+    filename = f"{job['title']}.{job['ext']}"
+    encoded_filename = quote(filename)
+    
+    return FileResponse(
+        path, 
+        filename=filename,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"; filename*=UTF-8\'\'{encoded_filename}'
+        }
+    )
+
+
+async def _run_download_job(job_id: str, body: DownloadJobRequest):
+    """Internal worker to execute yt-dlp in the background with progress tracking."""
+    job = JOBS[job_id]
+    job["status"] = "processing"
+    
+    suffix = f".{body.ext}"
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    
+    # If format_id starts with pytubefix_, use pytubefix worker
+    if body.format_id.startswith("pytubefix_"):
+        await _run_pytubefix_download(job_id, body, tmp_path)
+        return
+
+    def _progress_hook(d):
+        if d['status'] == 'downloading':
+            p = d.get('_percent_str', '0%').replace('%','')
+            try:
+                job["progress"] = float(p)
+                job["status"] = "downloading"
+            except:
+                pass
+        elif d['status'] == 'finished':
+            job["progress"] = 100
+            job["status"] = "merging"
+
+    ydl_opts = _build_ydl_opts({
+        "format": body.format_id,
+        "outtmpl": tmp_path,
+        "progress_hooks": [_progress_hook],
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+    })
+    
+    if FFMPEG_EXE:
+        ydl_opts["ffmpeg_location"] = FFMPEG_EXE
+    
+    if body.ext == "mp3":
+        ydl_opts.update({
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }]
+        })
+
+    loop = asyncio.get_event_loop()
+    try:
+        def _exec():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([body.url])
+        
+        await loop.run_in_executor(None, _exec)
+        
+        actual_path = _resolve_output_path(tmp_path, suffix)
+        if os.path.exists(actual_path):
+            job["path"] = actual_path
+            job["status"] = "completed"
+            job["progress"] = 100
+            logger.info(f"Job {job_id} completed: {actual_path}")
+        else:
+            job["status"] = "failed"
+            job["error"] = "Output file resolution failed"
+            
+    except Exception as e:
+        logger.exception(f"Job {job_id} failed")
+        job["status"] = "failed"
+        job["error"] = str(e)
+        _cleanup(tmp_path)
+
+
+async def _run_pytubefix_download(job_id: str, body: DownloadJobRequest, tmp_path: str):
+    """Fallback YouTube downloader using pytubefix."""
+    job = JOBS[job_id]
+    job["status"] = "downloading (pytubefix)"
+    
+    loop = asyncio.get_event_loop()
+    try:
+        def _exec():
+            yt = YouTube(body.url)
+            if body.format_id == "pytubefix_720p":
+                stream = yt.streams.filter(res="720p", file_extension="mp4").first() or yt.streams.get_highest_resolution()
+            elif body.format_id == "pytubefix_360p":
+                stream = yt.streams.filter(res="360p", file_extension="mp4").first()
+            else:
+                stream = yt.streams.get_audio_only()
+            
+            # Pytube downloads to a filename, we move it to tmp_path
+            out_file = stream.download(output_path=os.path.dirname(tmp_path))
+            os.replace(out_file, tmp_path)
+
+        await loop.run_in_executor(None, _exec)
+        
+        job["path"] = tmp_path
+        job["status"] = "completed"
+        job["progress"] = 100
+        logger.info(f"Job {job_id} completed via pytubefix: {tmp_path}")
+        
+    except Exception as e:
+        logger.exception(f"Pytubefix job {job_id} failed")
+        job["status"] = "failed"
+        job["error"] = str(e)
+        _cleanup(tmp_path)
+
+
+# ─── Legacy Route (Optional) ──────────────────────────────────────────────────
+@app.get("/api/download", tags=["Downloader"], include_in_schema=False)
+async def download_video_legacy(
     url: str = Query(..., description="Video page URL"),
     format_id: str = Query(..., description="yt-dlp format selector"),
     ext: str = Query("mp4", description="Output container extension"),
