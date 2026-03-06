@@ -372,18 +372,43 @@ async def fetch_metadata(body: FetchRequest):
             logger.info("yt-dlp failed for YouTube, trying pytubefix fallback...")
             try:
                 def _pytube_extract():
-                    # For data centers, use 'WEB_EMBED' or similar
-                    yt = YouTube(url, client='WEB_EMBED')
-                    return {
-                        "title": yt.title,
-                        "thumbnail": yt.thumbnail_url,
-                        "duration": yt.length,
-                        "uploader": yt.author,
-                        "extractor_key": "youtube",
-                        "webpage_url": url,
-                        "formats": [], 
-                        "is_pytubefix": True
-                    }
+                    # Try MWEB first as it's often more permissive on server IPs
+                    clients = ['MWEB', 'WEB_EMBED', 'ANDROID_VR', 'IOS']
+                    last_err = None
+                    
+                    for client_name in clients:
+                        try:
+                            # PO Token integration for pytubefix if available
+                            po_token = os.environ.get('YOUTUBE_PO_TOKEN')
+                            # pytubefix newer versions take token in constructor or inner methods
+                            # Note: pytubefix uses different params based on version, we try safe defaults
+                            yt = YouTube(
+                                url, 
+                                client=client_name,
+                                use_oauth=False,
+                                allow_oauth_cache=False
+                            )
+                            
+                            # Force access to title to trigger network request
+                            _ = yt.title 
+                            
+                            return {
+                                "title": yt.title,
+                                "thumbnail": yt.thumbnail_url,
+                                "duration": yt.length,
+                                "uploader": yt.author,
+                                "extractor_key": f"youtube_{client_name.lower()}",
+                                "webpage_url": url,
+                                "formats": [], 
+                                "is_pytubefix": True
+                            }
+                        except Exception as inner_e:
+                            last_err = inner_e
+                            logger.warn(f"Pytubefix client {client_name} failed: {inner_e}")
+                            continue
+                    
+                    if last_err: raise last_err
+
                 info = await loop.run_in_executor(None, _pytube_extract)
             except Exception as pe:
                 logger.error("pytubefix also failed: %s", pe)
@@ -642,45 +667,60 @@ async def _run_pytubefix_download(job_id: str, body: DownloadJobRequest, tmp_pat
     loop = asyncio.get_event_loop()
     try:
         def _exec():
-            yt = YouTube(body.url, client='WEB_EMBED')
-            if body.format_id == "pytubefix_720p":
-                stream = yt.streams.filter(res="720p", file_extension="mp4").first() or yt.streams.get_highest_resolution()
-            elif body.format_id == "pytubefix_360p":
-                stream = yt.streams.filter(res="360p", file_extension="mp4").first()
-            else:
-                stream = yt.streams.get_audio_only()
+            # Try multiple clients for download as well
+            clients = ['MWEB', 'WEB_EMBED', 'ANDROID_VR']
+            last_err = None
             
-            # Pytube downloads to a filename
-            out_file = stream.download(output_path=os.path.dirname(tmp_path))
+            for client_name in clients:
+                try:
+                    yt = YouTube(body.url, client=client_name)
+                    if body.format_id == "pytubefix_720p":
+                        stream = yt.streams.filter(res="720p", file_extension="mp4").first() or yt.streams.get_highest_resolution()
+                    elif body.format_id == "pytubefix_360p":
+                        stream = yt.streams.filter(res="360p", file_extension="mp4").first()
+                    else:
+                        stream = yt.streams.get_audio_only()
+                    
+                    if not stream:
+                        raise Exception(f"No stream found with client {client_name}")
+                        
+                    out_file = stream.download(output_path=os.path.dirname(tmp_path))
+                    return out_file # Success
+                except Exception as e:
+                    last_err = e
+                    logger.warn(f"Pytubefix download with {client_name} failed: {e}")
+                    continue
             
-            # If we need MP3 we MUST convert with FFmpeg
-            if body.ext == "mp3" and FFMPEG_EXE:
-                job["status"] = "converting to mp3"
-                final_path = tmp_path.rsplit('.', 1)[0] + ".mp3"
-                cmd = [FFMPEG_EXE, "-i", out_file, "-vn", "-ab", "192k", "-ar", "44100", "-y", final_path]
-                subprocess.run(cmd, capture_output=True)
-                _cleanup(out_file)
-                job["path"] = final_path
-                job["ext"] = "mp3"
-            elif body.ext == "mp4" and not out_file.endswith(".mp4") and FFMPEG_EXE:
-                job["status"] = "converting to mp4"
-                final_path = tmp_path.rsplit('.', 1)[0] + ".mp4"
-                cmd = [FFMPEG_EXE, "-i", out_file, "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-y", final_path]
-                subprocess.run(cmd, capture_output=True)
-                _cleanup(out_file)
-                job["path"] = final_path
-                job["ext"] = "mp4"
-            else:
-                # Just rename to ensure it has an extension
-                actual_ext = os.path.splitext(out_file)[1] or f".{body.ext}"
-                final_path = tmp_path.rsplit('.', 1)[0] + actual_ext
-                if out_file != final_path:
-                    os.replace(out_file, final_path)
-                job["path"] = final_path
-                job["ext"] = actual_ext.lstrip('.')
+            if last_err: raise last_err
 
-        await loop.run_in_executor(None, _exec)
+        out_file = await loop.run_in_executor(None, _exec)
         
+        # If we need MP3 we MUST convert with FFmpeg
+        if body.ext == "mp3" and FFMPEG_EXE:
+            job["status"] = "converting to mp3"
+            final_path = tmp_path.rsplit('.', 1)[0] + ".mp3"
+            cmd = [FFMPEG_EXE, "-i", out_file, "-vn", "-ab", "192k", "-ar", "44100", "-y", final_path]
+            subprocess.run(cmd, capture_output=True)
+            _cleanup(out_file)
+            job["path"] = final_path
+            job["ext"] = "mp3"
+        elif body.ext == "mp4" and not out_file.endswith(".mp4") and FFMPEG_EXE:
+            job["status"] = "converting to mp4"
+            final_path = tmp_path.rsplit('.', 1)[0] + ".mp4"
+            cmd = [FFMPEG_EXE, "-i", out_file, "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-y", final_path]
+            subprocess.run(cmd, capture_output=True)
+            _cleanup(out_file)
+            job["path"] = final_path
+            job["ext"] = "mp4"
+        else:
+            # Just rename to ensure it has an extension
+            actual_ext = os.path.splitext(out_file)[1] or f".{body.ext}"
+            final_path = tmp_path.rsplit('.', 1)[0] + actual_ext
+            if out_file != final_path:
+                os.replace(out_file, final_path)
+            job["path"] = final_path
+            job["ext"] = actual_ext.lstrip('.')
+
         if job.get("path") and os.path.exists(job["path"]):
             job["status"] = "completed"
             job["progress"] = 100
