@@ -133,7 +133,8 @@ def _build_ydl_opts(extra: dict | None = None) -> dict:
         # Prefer HTTP(S) sources, skip DRM-protected formats
         "format_sort": ["res", "ext:mp4:m4a", "br", "asr"],
         "nocheckcertificate": True,
-        "merge_output_format": "mp4"
+        "merge_output_format": "mp4",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
     }
     
     # YouTube bypass using environment variables
@@ -391,7 +392,7 @@ async def fetch_metadata(body: FetchRequest):
     except Exception as e:
         # If YouTube, try pytubefix as fallback
         if _is_youtube(url):
-            logger.info("yt-dlp failed for YouTube, trying pytubefix fallback...")
+            logger.info("yt-dlp failed for YouTube: %s. Trying pytubefix fallback...", e)
             try:
                 def _pytube_extract():
                     # Try MWEB first as it's often more permissive on server IPs
