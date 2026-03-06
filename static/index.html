@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VidDL — Download Videos & Audio from Any Platform</title>
+  <meta name="description" content="Free, fast video downloader. Download videos and audio from YouTube, TikTok, Instagram, Facebook, Reddit, X/Twitter and more. No account required." />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'sans-serif'] },
+          colors: {
+            brand: {
+              50:  '#eef4ff',
+              100: '#d9e8ff',
+              200: '#bcd5ff',
+              300: '#8eb9ff',
+              400: '#5a93ff',
+              500: '#3b6df5',
+              600: '#2a4feb',
+              700: '#2240d4',
+              800: '#2137ab',
+              900: '#1f3086',
+            },
+          },
+          animation: {
+            'fade-in': 'fadeIn 0.4s ease forwards',
+            'slide-up': 'slideUp 0.4s ease forwards',
+            'spin-slow': 'spin 1.5s linear infinite',
+            'pulse-glow': 'pulseGlow 2s ease-in-out infinite',
+          },
+          keyframes: {
+            fadeIn: { from: { opacity: 0 }, to: { opacity: 1 } },
+            slideUp: { from: { opacity: 0, transform: 'translateY(20px)' }, to: { opacity: 1, transform: 'translateY(0)' } },
+            pulseGlow: {
+              '0%, 100%': { boxShadow: '0 0 20px rgba(59,109,245,0.3)' },
+              '50%':       { boxShadow: '0 0 40px rgba(59,109,245,0.7)' },
+            },
+          },
+        },
+      },
+    }
+  </script>
+  <style>
+    :root { color-scheme: dark; }
+    body { background: #080c14; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #111827; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+
+    /* Gradient text helper */
+    .gradient-text {
+      background: linear-gradient(135deg, #60a5fa 0%, #818cf8 50%, #a78bfa 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    /* Glass card */
+    .glass {
+      background: rgba(255,255,255,0.04);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+
+    /* Animated background orbs */
+    .orb {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(80px);
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.25;
+    }
+    .orb-1 { width: 600px; height: 600px; background: radial-gradient(circle, #3b6df5, transparent); top: -200px; left: -200px; }
+    .orb-2 { width: 500px; height: 500px; background: radial-gradient(circle, #7c3aed, transparent); bottom: -150px; right: -150px; }
+    .orb-3 { width: 350px; height: 350px; background: radial-gradient(circle, #0ea5e9, transparent); top: 40%; left: 50%; transform: translate(-50%, -50%); }
+
+    /* Input glow on focus */
+    #urlInput:focus { box-shadow: 0 0 0 3px rgba(59,109,245,0.35); }
+
+    /* Platform pill */
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 12px; border-radius: 999px;
+      font-size: 0.72rem; font-weight: 600; letter-spacing: 0.03em;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.07);
+      color: #9ca3af;
+    }
+    .pill svg { width: 14px; height: 14px; }
+
+    /* Download buttons */
+    .fmt-btn {
+      position: relative; overflow: hidden;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 10px 18px; border-radius: 10px;
+      font-size: 0.82rem; font-weight: 600;
+      transition: all 0.2s ease;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .fmt-btn::after {
+      content: '';
+      position: absolute; inset: 0;
+      background: rgba(255,255,255,0);
+      transition: background 0.2s ease;
+    }
+    .fmt-btn:hover::after { background: rgba(255,255,255,0.07); }
+    .fmt-btn:active { transform: scale(0.97); }
+
+    .fmt-btn-video {
+      background: linear-gradient(135deg, #1e3a8a 0%, #1d4ed8 100%);
+      color: #bfdbfe;
+    }
+    .fmt-btn-audio {
+      background: linear-gradient(135deg, #4c1d95 0%, #7c3aed 100%);
+      color: #ddd6fe;
+    }
+    .fmt-btn-best {
+      background: linear-gradient(135deg, #0f3460 0%, #0ea5e9 100%);
+      color: #bae6fd;
+    }
+
+    /* Loading spinner */
+    .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid rgba(59,109,245,0.2);
+      border-top-color: #3b6df5;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Playlist item */
+    .playlist-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px; border-radius: 10px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.07);
+      transition: background 0.2s;
+      cursor: pointer;
+    }
+    .playlist-item:hover { background: rgba(255,255,255,0.08); }
+
+    /* Toast */
+    .toast {
+      position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+      padding: 12px 20px; border-radius: 10px;
+      font-size: 0.85rem; font-weight: 500;
+      animation: slideUp 0.3s ease forwards;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+    }
+    .toast-success { background: #064e3b; color: #6ee7b7; border: 1px solid #065f46; }
+    .toast-error   { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d; }
+    .toast-info    { background: #1e3a5f; color: #93c5fd; border: 1px solid #1d4ed8; }
+  </style>
+</head>
+<body class="min-h-screen font-sans text-white antialiased overflow-x-hidden">
+
+  <!-- Background Orbs -->
+  <div class="orb orb-1"></div>
+  <div class="orb orb-2"></div>
+  <div class="orb orb-3"></div>
+
+  <!-- Main Layout -->
+  <div class="relative z-10 min-h-screen flex flex-col">
+
+    <!-- ── Header ───────────────────────────────────────────────────── -->
+    <header class="glass border-b border-white/5 sticky top-0 z-50">
+      <div class="max-w-5xl mx-auto px-5 py-4 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <!-- Logo -->
+          <div class="w-9 h-9 rounded-xl flex items-center justify-center"
+               style="background: linear-gradient(135deg, #3b6df5, #7c3aed);">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-white" fill="none"
+                 viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 3v12" />
+            </svg>
+          </div>
+          <span class="text-xl font-bold tracking-tight">
+            Vid<span class="gradient-text">DL</span>
+          </span>
+        </div>
+        <div class="flex items-center gap-2 text-xs text-gray-500">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+          Free • No account required
+        </div>
+      </div>
+    </header>
+
+    <!-- ── Hero ─────────────────────────────────────────────────────── -->
+    <section class="flex-1 flex flex-col items-center justify-center px-5 pt-16 pb-10">
+      <div class="w-full max-w-2xl mx-auto text-center animate-fade-in">
+
+        <!-- Badge -->
+        <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full mb-6 text-xs font-semibold tracking-wide text-brand-300"
+             style="background: rgba(59,109,245,0.12); border: 1px solid rgba(59,109,245,0.25);">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/>
+          </svg>
+          Powered by yt-dlp • FFmpeg audio extraction
+        </div>
+
+        <!-- Headline -->
+        <h1 class="text-4xl sm:text-5xl font-extrabold leading-tight mb-4 tracking-tight">
+          Download Any Video,<br />
+          <span class="gradient-text">Instantly & Free</span>
+        </h1>
+        <p class="text-gray-400 text-base mb-10 max-w-lg mx-auto leading-relaxed">
+          Paste a link from YouTube, TikTok, Instagram, Facebook, Reddit, or X — choose your format and download in seconds.
+        </p>
+
+        <!-- Supported Platforms -->
+        <div class="flex flex-wrap items-center justify-center gap-2 mb-10">
+          <span class="pill">▶ YouTube</span>
+          <span class="pill">♪ TikTok</span>
+          <span class="pill">◈ Instagram</span>
+          <span class="pill">⬛ Facebook</span>
+          <span class="pill">🤖 Reddit</span>
+          <span class="pill">✕ X / Twitter</span>
+          <span class="pill">+ More</span>
+        </div>
+
+        <!-- ── Input Card ───────────────────────────────────────────── -->
+        <div class="glass rounded-2xl p-5 sm:p-6 shadow-2xl animate-pulse-glow">
+          <div class="flex flex-col sm:flex-row gap-3">
+            <div class="relative flex-1">
+              <svg xmlns="http://www.w3.org/2000/svg"
+                   class="absolute left-3.5 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500 pointer-events-none"
+                   fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+              </svg>
+              <input
+                id="urlInput"
+                type="url"
+                placeholder="Paste video URL here..."
+                class="w-full bg-white/5 border border-white/10 rounded-xl pl-11 pr-4 py-3.5 text-sm text-white placeholder-gray-500 outline-none transition-all duration-200 focus:border-brand-500"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            <button
+              id="fetchBtn"
+              onclick="handleFetch()"
+              class="relative overflow-hidden px-7 py-3.5 rounded-xl font-semibold text-sm text-white transition-all duration-200 active:scale-95 flex items-center gap-2 justify-center"
+              style="background: linear-gradient(135deg, #3b6df5, #7c3aed); box-shadow: 0 4px 20px rgba(59,109,245,0.4);"
+              onmouseover="this.style.boxShadow='0 6px 30px rgba(59,109,245,0.65)'"
+              onmouseout="this.style.boxShadow='0 4px 20px rgba(59,109,245,0.4)'"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 115 11a6 6 0 0112 0z" />
+              </svg>
+              <span id="fetchBtnText">Fetch</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Loading State ───────────────────────────────────────────── -->
+      <div id="loadingState" class="hidden mt-10 flex flex-col items-center gap-4 animate-fade-in">
+        <div class="spinner"></div>
+        <p class="text-sm text-gray-400">Fetching info<span id="loadingDots">...</span></p>
+      </div>
+
+      <!-- ── Results: Single Video ────────────────────────────────────── -->
+      <div id="resultCard" class="hidden w-full max-w-2xl mx-auto mt-8 animate-slide-up">
+        <div class="glass rounded-2xl overflow-hidden shadow-2xl">
+
+          <!-- Video preview row -->
+          <div class="flex gap-4 p-5 items-start border-b border-white/5">
+            <div class="relative flex-shrink-0">
+              <img id="resultThumb" src="" alt="thumbnail"
+                   class="w-32 h-20 object-cover rounded-xl bg-white/5 border border-white/10" />
+              <div id="resultDuration"
+                   class="absolute bottom-1.5 right-1.5 text-xs font-semibold bg-black/70 rounded px-1.5 py-0.5 hidden"></div>
+            </div>
+            <div class="flex-1 min-w-0">
+              <p id="resultTitle" class="font-semibold text-sm leading-snug text-white line-clamp-2 mb-1.5"></p>
+              <p id="resultChannel" class="text-xs text-gray-500 mb-2"></p>
+              <div id="resultPlatformBadge" class="pill inline-flex"></div>
+            </div>
+          </div>
+
+          <!-- Format buttons -->
+          <div class="p-5">
+            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-3">Choose Format</p>
+            <div id="formatButtons" class="flex flex-wrap gap-2.5"></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ── Results: Playlist ────────────────────────────────────────── -->
+      <div id="playlistCard" class="hidden w-full max-w-2xl mx-auto mt-8 animate-slide-up">
+        <div class="glass rounded-2xl overflow-hidden shadow-2xl">
+          <div class="p-5 border-b border-white/5">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl flex items-center justify-center bg-brand-700/30 border border-brand-500/30">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 10h16M4 14h10M4 18h10" />
+                </svg>
+              </div>
+              <div>
+                <p id="playlistTitle" class="font-semibold text-sm text-white"></p>
+                <p id="playlistCount" class="text-xs text-gray-500"></p>
+              </div>
+            </div>
+          </div>
+          <div id="playlistItems" class="p-4 flex flex-col gap-2 max-h-96 overflow-y-auto"></div>
+        </div>
+      </div>
+
+      <!-- ── Features Row ─────────────────────────────────────────────── -->
+      <div class="w-full max-w-2xl mx-auto mt-14 grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div class="glass rounded-xl p-5 text-center hover:bg-white/5 transition-all duration-200">
+          <div class="w-10 h-10 mx-auto mb-3 rounded-xl bg-brand-700/30 border border-brand-500/20 flex items-center justify-center">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <p class="text-sm font-semibold text-white mb-1">No Watermarks</p>
+          <p class="text-xs text-gray-500">Clean TikTok streams without logos</p>
+        </div>
+        <div class="glass rounded-xl p-5 text-center hover:bg-white/5 transition-all duration-200">
+          <div class="w-10 h-10 mx-auto mb-3 rounded-xl bg-purple-700/30 border border-purple-500/20 flex items-center justify-center">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+            </svg>
+          </div>
+          <p class="text-sm font-semibold text-white mb-1">MP3 Extraction</p>
+          <p class="text-xs text-gray-500">High-quality audio from any video</p>
+        </div>
+        <div class="glass rounded-xl p-5 text-center hover:bg-white/5 transition-all duration-200">
+          <div class="w-10 h-10 mx-auto mb-3 rounded-xl bg-emerald-700/30 border border-emerald-500/20 flex items-center justify-center">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+            </svg>
+          </div>
+          <p class="text-sm font-semibold text-white mb-1">No Sign-up</p>
+          <p class="text-xs text-gray-500">Fully stateless, no accounts ever</p>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ── Footer ───────────────────────────────────────────────────── -->
+    <footer class="border-t border-white/5 py-6 px-5 text-center text-xs text-gray-600">
+      VidDL — For personal use only. Respect copyright and platform terms of service.
+    </footer>
+
+  </div><!-- /main layout -->
+
+  <!-- ── JavaScript ───────────────────────────────────────────────── -->
+  <script>
+    const API_BASE = '';  // same origin
+
+    // ── Utility ──────────────────────────────────────────────────────
+    function formatDuration(secs) {
+      if (!secs) return null;
+      const h = Math.floor(secs / 3600);
+      const m = Math.floor((secs % 3600) / 60);
+      const s = secs % 60;
+      if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+      return `${m}:${String(s).padStart(2,'0')}`;
+    }
+
+    function formatBytes(b) {
+      if (!b) return null;
+      if (b >= 1073741824) return (b/1073741824).toFixed(1)+' GB';
+      if (b >= 1048576)    return (b/1048576).toFixed(0)+' MB';
+      return (b/1024).toFixed(0)+' KB';
+    }
+
+    function showToast(msg, type = 'info') {
+      const el = document.createElement('div');
+      el.className = `toast toast-${type}`;
+      el.textContent = msg;
+      document.body.appendChild(el);
+      setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.4s'; }, 3000);
+      setTimeout(() => el.remove(), 3500);
+    }
+
+    function platformLabel(key) {
+      const map = {
+        youtube: '▶ YouTube', tiktok: '♪ TikTok',
+        instagram: '◈ Instagram', facebook: '⬛ Facebook',
+        reddit: '🤖 Reddit', twitter: '✕ X/Twitter',
+        generic: '🌐 Web',
+      };
+      return map[key] || `🌐 ${key || 'Web'}`;
+    }
+
+    // ── State ──────────────────────────────────────────────────────
+    let currentVideoUrl = '';
+    let currentTitle = '';
+
+    // ── Fetch Handler ──────────────────────────────────────────────
+    async function handleFetch() {
+      const url = document.getElementById('urlInput').value.trim();
+      if (!url) { showToast('Please paste a video URL first.', 'error'); return; }
+
+      setLoadingState(true);
+      hideResults();
+
+      try {
+        const res = await fetch(`${API_BASE}/api/fetch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showToast(data.detail || 'Failed to fetch video info.', 'error');
+          return;
+        }
+        if (data.type === 'playlist') {
+          renderPlaylist(data, url);
+        } else {
+          renderVideo(data, url);
+        }
+      } catch (err) {
+        showToast('Network error. Is the server running?', 'error');
+        console.error(err);
+      } finally {
+        setLoadingState(false);
+      }
+    }
+
+    // Allow Enter key to trigger fetch
+    document.getElementById('urlInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') handleFetch();
+    });
+
+    // ── Render: Single Video ──────────────────────────────────────
+    function renderVideo(data, sourceUrl) {
+      currentVideoUrl = data.webpage_url || sourceUrl;
+      currentTitle = data.title || 'download';
+
+      const thumb = document.getElementById('resultThumb');
+      thumb.src = data.thumbnail || '';
+      thumb.onerror = () => { thumb.src = ''; thumb.style.background = '#1f2937'; };
+
+      document.getElementById('resultTitle').textContent = data.title || 'Unknown Title';
+      document.getElementById('resultChannel').textContent = data.channel || '';
+      document.getElementById('resultPlatformBadge').textContent = platformLabel(data.platform);
+
+      const dur = formatDuration(data.duration);
+      const durEl = document.getElementById('resultDuration');
+      if (dur) { durEl.textContent = dur; durEl.classList.remove('hidden'); }
+      else       { durEl.classList.add('hidden'); }
+
+      const container = document.getElementById('formatButtons');
+      container.innerHTML = '';
+
+      (data.formats || []).forEach(fmt => {
+        const btn = document.createElement('button');
+        const sizeLabel = formatBytes(fmt.filesize_approx);
+        const isAudio = fmt.type === 'audio';
+
+        btn.className = `fmt-btn ${isAudio ? 'fmt-btn-audio' : (fmt.label === 'Best Quality' ? 'fmt-btn-best' : 'fmt-btn-video')}`;
+        btn.innerHTML = `
+          ${isAudio
+            ? `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+                 <path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2z" />
+               </svg>`
+            : `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+                 <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 3v12" />
+               </svg>`}
+          <span>${fmt.label}</span>
+          ${sizeLabel ? `<span class="opacity-60 text-xs">~${sizeLabel}</span>` : ''}
+        `;
+        btn.title = `Download ${fmt.label}`;
+        btn.onclick = () => triggerDownload(currentVideoUrl, fmt.format_id, fmt.ext, currentTitle, btn);
+        container.appendChild(btn);
+      });
+
+      document.getElementById('resultCard').classList.remove('hidden');
+    }
+
+    // ── Render: Playlist ──────────────────────────────────────────
+    function renderPlaylist(data, sourceUrl) {
+      document.getElementById('playlistTitle').textContent = data.title || 'Playlist';
+      document.getElementById('playlistCount').textContent =
+        `${data.item_count} item${data.item_count !== 1 ? 's' : ''}`;
+
+      const container = document.getElementById('playlistItems');
+      container.innerHTML = '';
+
+      (data.items || []).forEach((item, idx) => {
+        const div = document.createElement('div');
+        div.className = 'playlist-item';
+        div.innerHTML = `
+          <div class="w-7 h-7 flex-shrink-0 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center text-xs font-bold text-gray-500">${idx+1}</div>
+          ${item.thumbnail
+            ? `<img src="${item.thumbnail}" class="w-14 h-9 object-cover rounded-lg bg-white/5 flex-shrink-0" onerror="this.style.display='none'" />`
+            : ''}
+          <div class="flex-1 min-w-0">
+            <p class="text-xs font-medium text-gray-200 truncate">${item.title || 'Untitled'}</p>
+            ${item.duration ? `<p class="text-xs text-gray-600">${formatDuration(item.duration)}</p>` : ''}
+          </div>
+          <div class="flex gap-1.5 flex-shrink-0">
+            <button class="fmt-btn fmt-btn-video text-xs px-2.5 py-1.5"
+                    onclick="fetchSingleFromPlaylist(event, '${escapeAttr(item.url)}', '${escapeAttr(item.title)}')"
+                    title="Fetch formats for this video">
+              Fetch
+            </button>
+          </div>
+        `;
+        container.appendChild(div);
+      });
+
+      document.getElementById('playlistCard').classList.remove('hidden');
+    }
+
+    function escapeAttr(str) {
+      return (str || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    }
+
+    async function fetchSingleFromPlaylist(e, url, title) {
+      e.stopPropagation();
+      document.getElementById('urlInput').value = url;
+      await handleFetch();
+    }
+
+    // ── Download Trigger ──────────────────────────────────────────
+    function triggerDownload(videoUrl, formatId, ext, title, btn) {
+      const params = new URLSearchParams({
+        url: videoUrl,
+        format_id: formatId,
+        ext: ext,
+        title: title,
+      });
+      const downloadUrl = `${API_BASE}/api/download?${params.toString()}`;
+
+      // Create invisible anchor and click it — browser handles the save dialog
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = `${title}.${ext}`;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      // Visual feedback
+      const originalHTML = btn.innerHTML;
+      btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg> Downloading...`;
+      btn.disabled = true;
+      showToast(`Starting download…`, 'info');
+
+      setTimeout(() => {
+        btn.innerHTML = originalHTML;
+        btn.disabled = false;
+      }, 4000);
+    }
+
+    // ── UI Helpers ────────────────────────────────────────────────
+    function setLoadingState(loading) {
+      const btn = document.getElementById('fetchBtn');
+      const btnText = document.getElementById('fetchBtnText');
+      const loader = document.getElementById('loadingState');
+
+      btn.disabled = loading;
+      btnText.textContent = loading ? 'Fetching…' : 'Fetch';
+      loader.classList.toggle('hidden', !loading);
+      loader.classList.toggle('flex', loading);
+    }
+
+    function hideResults() {
+      document.getElementById('resultCard').classList.add('hidden');
+      document.getElementById('playlistCard').classList.add('hidden');
+    }
+
+    // Animated loading dots
+    let dotsInterval = null;
+    const loadingObserver = new MutationObserver(() => {
+      const loader = document.getElementById('loadingState');
+      if (!loader.classList.contains('hidden')) {
+        let count = 0;
+        dotsInterval = setInterval(() => {
+          document.getElementById('loadingDots').textContent = '.'.repeat((count % 3) + 1);
+          count++;
+        }, 400);
+      } else {
+        clearInterval(dotsInterval);
+      }
+    });
+    loadingObserver.observe(document.getElementById('loadingState'), { attributes: true });
+  </script>
+</body>
+</html>
