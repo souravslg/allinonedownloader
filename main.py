@@ -317,7 +317,13 @@ async def fetch_metadata(body: FetchRequest):
         try:
             def _pytube_extract():
                 # MWEB or WEB_EMBED usually work better on server IPs
-                yt = YouTube(url, client='MWEB')
+                po_token = os.environ.get('YOUTUBE_PO_TOKEN')
+                yt = YouTube(
+                    url, 
+                    client='MWEB',
+                    use_po_token=True if po_token else False,
+                    po_token=po_token
+                )
                 return {
                     "title": yt.title,
                     "thumbnail": yt.thumbnail_url,
@@ -378,13 +384,15 @@ async def fetch_metadata(body: FetchRequest):
                     
                     for client_name in clients:
                         try:
-                            # PO Token integration for pytubefix if available
+                            # PO Token integration for pytubefix
+                            # Some clients (like MWEB) require po_token on data centers
                             po_token = os.environ.get('YOUTUBE_PO_TOKEN')
-                            # pytubefix newer versions take token in constructor or inner methods
-                            # Note: pytubefix uses different params based on version, we try safe defaults
+                            
                             yt = YouTube(
                                 url, 
                                 client=client_name,
+                                use_po_token=True if po_token else False,
+                                po_token=po_token,
                                 use_oauth=False,
                                 allow_oauth_cache=False
                             )
@@ -668,12 +676,21 @@ async def _run_pytubefix_download(job_id: str, body: DownloadJobRequest, tmp_pat
     try:
         def _exec():
             # Try multiple clients for download as well
-            clients = ['MWEB', 'WEB_EMBED', 'ANDROID_VR']
+            # TVHTML5 is often very resilient for downloads
+            clients = ['TVHTML5', 'WEB_EMBED', 'ANDROID_VR', 'MWEB']
             last_err = None
+            
+            # PO Token for download
+            po_token = os.environ.get('YOUTUBE_PO_TOKEN')
             
             for client_name in clients:
                 try:
-                    yt = YouTube(body.url, client=client_name)
+                    yt = YouTube(
+                        body.url, 
+                        client=client_name,
+                        use_po_token=True if po_token else False,
+                        po_token=po_token
+                    )
                     if body.format_id == "pytubefix_720p":
                         stream = yt.streams.filter(res="720p", file_extension="mp4").first() or yt.streams.get_highest_resolution()
                     elif body.format_id == "pytubefix_360p":
