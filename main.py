@@ -30,8 +30,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("viddl")
 
-# ─── FFmpeg Setup ─────────────────────────────────────────────────────────────
+# ─── Environment ─────────────────────────────────────────────────────────────
 FFMPEG_EXE: Optional[str] = None
+IS_KOYEB: bool = os.path.exists("/app") or "KOYEB" in os.environ
 
 def _init_ffmpeg() -> bool:
     """Detect ffmpeg and return True if found, False otherwise."""
@@ -307,7 +308,48 @@ async def fetch_metadata(body: FetchRequest):
         raise HTTPException(status_code=400, detail="URL is required.")
 
     logger.info("Fetching metadata for: %s", url)
+    loop = asyncio.get_event_loop()
 
+    # ── Koyeb Force YouTube Fix ──────────────────────────────────────────────
+    # Data center IPs are often blocked by yt-dlp. Force pytubefix primary on Koyeb.
+    if IS_KOYEB and _is_youtube(url):
+        logger.info("Running on Koyeb: Forcing pytubefix for YouTube metadata")
+        try:
+            def _pytube_extract():
+                # MWEB or WEB_EMBED usually work better on server IPs
+                yt = YouTube(url, client='MWEB')
+                return {
+                    "title": yt.title,
+                    "thumbnail": yt.thumbnail_url,
+                    "duration": yt.length,
+                    "uploader": yt.author,
+                    "extractor_key": "youtube",
+                    "webpage_url": url,
+                    "formats": [], 
+                    "is_pytubefix": True
+                }
+            info = await loop.run_in_executor(None, _pytube_extract)
+            # Skip to specialized format picker
+            formats = [
+                {"format_id": "pytubefix_720p", "label": "720p (Pytube)", "ext": "mp4", "type": "video", "needs_merge": False},
+                {"format_id": "pytubefix_360p", "label": "360p (Pytube)", "ext": "mp4", "type": "video", "needs_merge": False},
+                {"format_id": "pytubefix_audio", "label": "Audio (Pytube)", "ext": "m4a", "type": "audio"},
+            ]
+            return JSONResponse({
+                "type": "video",
+                "title": info["title"],
+                "thumbnail": info["thumbnail"],
+                "channel": info["uploader"],
+                "duration": info["duration"],
+                "platform": "youtube",
+                "webpage_url": info["webpage_url"],
+                "formats": formats,
+            })
+        except Exception as pe:
+             logger.error("Koyeb Force Pytube failed: %s", pe)
+             # Fall back to yt-dlp just in case, or let error handle
+    
+    # ── Standard Flow (yt-dlp first) ────────────────────────────────────────
     ydl_opts = _build_ydl_opts(
         {
             "skip_download": True,
