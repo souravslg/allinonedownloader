@@ -343,8 +343,8 @@ async def fetch_metadata(body: FetchRequest):
             }
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(
-                    f"https://{RAPIDAPI_HOST}/video/details/", 
-                    params={"id": video_id}, 
+                    f"https://{RAPIDAPI_HOST}/video/details", 
+                    params={"id": video_id, "hl": "en", "gl": "US"}, 
                     headers=headers
                 )
                 data = resp.json()
@@ -847,8 +847,8 @@ async def _run_rapidapi_download(job_id: str, body: DownloadJobRequest, tmp_path
         
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
-                f"https://{RAPIDAPI_HOST}/video/streaming-data/", 
-                params={"id": video_id}, 
+                f"https://{RAPIDAPI_HOST}/video/streaming-data", 
+                params={"id": video_id, "hl": "en", "gl": "US"}, 
                 headers=headers
             )
             data = resp.json()
