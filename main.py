@@ -135,10 +135,26 @@ def _build_ydl_opts(extra: dict | None = None) -> dict:
         "merge_output_format": "mp4"
     }
     
+    # YouTube bypass using environment variables
+    po_token = os.environ.get('YOUTUBE_PO_TOKEN')
+    visitor_data = os.environ.get('YOUTUBE_VISITOR_DATA')
+    
+    if po_token and visitor_data:
+        # If user provided a raw token, we ensure the web+ prefix is present for the web client
+        if not po_token.startswith("web+"):
+            po_token = f"web+{po_token}"
+            
+        opts["extractor_args"]["youtube"].update({
+            "po_token": [po_token],
+            "visitor_data": [visitor_data],
+        })
+        logger.info("Using PO Token and Visitor Data for YouTube bypass")
+
     # Use cookies.txt if provided in root
     if os.path.exists("cookies.txt"):
         opts["cookiefile"] = "cookies.txt"
         logger.info("Using cookies.txt for authentication")
+    
     if extra:
         opts.update(extra)
     return opts
@@ -314,7 +330,8 @@ async def fetch_metadata(body: FetchRequest):
             logger.info("yt-dlp failed for YouTube, trying pytubefix fallback...")
             try:
                 def _pytube_extract():
-                    yt = YouTube(url)
+                    # For data centers, use 'WEB_EMBED' or similar
+                    yt = YouTube(url, client='WEB_EMBED')
                     return {
                         "title": yt.title,
                         "thumbnail": yt.thumbnail_url,
@@ -322,13 +339,18 @@ async def fetch_metadata(body: FetchRequest):
                         "uploader": yt.author,
                         "extractor_key": "youtube",
                         "webpage_url": url,
-                        "formats": [], # Simplified for fallback
+                        "formats": [], 
                         "is_pytubefix": True
                     }
                 info = await loop.run_in_executor(None, _pytube_extract)
             except Exception as pe:
                 logger.error("pytubefix also failed: %s", pe)
-                raise HTTPException(status_code=422, detail=f"YouTube access blocked: {str(e)}")
+                # Provide a more helpful message for Koyeb users
+                error_msg = str(e) if "Sign in to confirm" in str(e) else str(pe)
+                raise HTTPException(
+                    status_code=422, 
+                    detail=f"YouTube is blocking this server IP. Try adding YOUTUBE_PO_TOKEN and YOUTUBE_VISITOR_DATA to environment variables. (Error: {error_msg})"
+                )
         else:
             logger.error("yt-dlp error: %s", e)
             raise HTTPException(status_code=422, detail=f"Could not process URL: {str(e)}")
@@ -578,7 +600,7 @@ async def _run_pytubefix_download(job_id: str, body: DownloadJobRequest, tmp_pat
     loop = asyncio.get_event_loop()
     try:
         def _exec():
-            yt = YouTube(body.url)
+            yt = YouTube(body.url, client='WEB_EMBED')
             if body.format_id == "pytubefix_720p":
                 stream = yt.streams.filter(res="720p", file_extension="mp4").first() or yt.streams.get_highest_resolution()
             elif body.format_id == "pytubefix_360p":
