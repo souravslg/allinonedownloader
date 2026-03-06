@@ -132,11 +132,7 @@ def _build_ydl_opts(extra: dict | None = None) -> dict:
         # Prefer HTTP(S) sources, skip DRM-protected formats
         "format_sort": ["res", "ext:mp4:m4a", "br", "asr"],
         "nocheckcertificate": True,
-        "merge_output_format": "mp4",
-        "postprocessors": [{
-            "key": "FFmpegVideoConvertor",
-            "preferedformat": "mp4",
-        }]
+        "merge_output_format": "mp4"
     }
     
     # Use cookies.txt if provided in root
@@ -466,24 +462,21 @@ async def get_job_file(job_id: str):
     if not path or not os.path.exists(path):
          raise HTTPException(status_code=404, detail="File lost or deleted")
 
-    # Sanitize title for filename
-    # Strip non-ASCII for the simple filename fallback to prevent header crashes
-    ascii_title = "".join(c if ord(c) < 128 else "_" for c in job['title'])
-    safe_name = _sanitize_filename(ascii_title) or "download"
-    encoded_title = quote(job['title'])
+    # Use a generic but safe filename for the response. 
+    # FastAPI's FileResponse internally handles UTF-8 filenames correctly 
+    # when the 'filename' parameter is used.
+    ext = job.get("ext") or "mp4"
+    filename = f"{job['title']}.{ext}"
     
-    # MIME logic
+    # We MUST ensure the media_type is exactly what matches the extension
     mime_type, _ = mimetypes.guess_type(path)
     if not mime_type:
-        mime_type = "video/mp4" if job['ext'] == "mp4" else "application/octet-stream"
-
-    # Standard-compliant Content-Disposition
-    cd_header = f'attachment; filename="{safe_name}.{job["ext"]}"; filename*=UTF-8\'\'{encoded_title}.{job["ext"]}'
+        mime_type = "video/mp4" if ext == "mp4" else "application/octet-stream"
 
     return FileResponse(
         path, 
         media_type=mime_type,
-        headers={"Content-Disposition": cd_header}
+        filename=filename  # Let FastAPI handle Content-Disposition automatically
     )
 
 
@@ -560,7 +553,11 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
             job["path"] = actual_path
             job["status"] = "completed"
             job["progress"] = 100
-            job["ext"] = os.path.splitext(actual_path)[1].lstrip('.')
+            
+            # Ensure extension logic is robust
+            detected_ext = os.path.splitext(actual_path)[1].lstrip('.')
+            job["ext"] = detected_ext if detected_ext else body.ext
+            
             logger.info(f"Job {job_id} completed: {actual_path}")
         else:
             job["status"] = "failed"
