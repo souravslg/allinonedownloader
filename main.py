@@ -125,13 +125,21 @@ def _sanitize_filename(name: str) -> str:
 def _use_vidssave(url: str) -> bool:
     """Return True if the URL should be handled by Vidssave API."""
     u = url.lower()
-    return any(x in u for x in ["youtube.com", "youtu.be", "instagram.com", "facebook.com", "fb.watch"])
+    vid_sources = [
+        "youtube.com", "youtu.be",
+        "instagram.com", "instagr.am", "ig.me",
+        "facebook.com", "fb.com", "fb.watch",
+        "tiktok.com", "x.com", "twitter.com"
+    ]
+    return any(x in u for x in vid_sources)
 
 def _get_vidssave_platform(url: str) -> str:
     u = url.lower()
     if "youtube.com" in u or "youtu.be" in u: return "youtube"
-    if "instagram.com" in u: return "instagram"
-    if "facebook.com" in u or "fb.watch" in u: return "facebook"
+    if any(x in u for x in ["instagram.com", "instagr.am", "ig.me"]): return "instagram"
+    if any(x in u for x in ["facebook.com", "fb.com", "fb.watch"]): return "facebook"
+    if "tiktok.com" in u: return "tiktok"
+    if "x.com" in u or "twitter.com" in u: return "x"
     return "social"
 
 
