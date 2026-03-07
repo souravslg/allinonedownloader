@@ -128,6 +128,7 @@ def _use_vidssave(url: str) -> bool:
     u = url.lower()
     vid_sources = [
         "youtube.com", "youtu.be",
+        "instagram.com", "instagr.am", "ig.me",
         "tiktok.com", "x.com", "twitter.com"
     ]
     return any(x in u for x in vid_sources)
@@ -210,7 +211,6 @@ def _get_vidssave_platform(url: str) -> str:
     u = url.lower()
     if "youtube.com" in u or "youtu.be" in u: return "youtube"
     if any(x in u for x in ["instagram.com", "instagr.am", "ig.me"]): return "instagram"
-    if any(x in u for x in ["facebook.com", "fb.com", "fb.watch"]): return "facebook"
     if "tiktok.com" in u: return "tiktok"
     if "x.com" in u or "twitter.com" in u: return "x"
     return "social"
@@ -298,6 +298,72 @@ async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
                 logger.error(f"Vidssave attempt ({origin}) failed: {e}")
                 if origin == "source":
                     return None
+
+
+async def _fetch_chative_fb_metadata(url: str) -> Optional[dict]:
+    """Fetch Facebook metadata from Chative.io API."""
+    encoded_url = quote(url)
+    api_url = f"https://serverless-tooly-gateway-6n4h522y.ue.gateway.dev/facebook/video?url={encoded_url}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Referer": "https://chative.io/",
+        "Origin": "https://chative.io",
+        "Accept": "*/*"
+    }
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            logger.info(f"Fetching Facebook metadata from Chative: {url}")
+            resp = await client.get(api_url, headers=headers)
+            if resp.status_code != 200:
+                return None
+            
+            data = resp.json()
+            if not data.get("success"):
+                return None
+            
+            formats = []
+            videos = data.get("videos", {})
+            
+            # Map quality levels
+            for q_key, q_label in [("hd", "HD Quality"), ("sd", "SD Quality")]:
+                v = videos.get(q_key)
+                if v and v.get("url"):
+                    size_str = v.get("size", "")
+                    size_bytes = None
+                    try:
+                        if "MB" in size_str:
+                            size_bytes = int(float(size_str.replace("MB", "").strip()) * 1024 * 1024)
+                        elif "KB" in size_str:
+                            size_bytes = int(float(size_str.replace("KB", "").strip()) * 1024)
+                    except:
+                        pass
+                        
+                    formats.append({
+                        "format_id": f"chative_{q_key}",
+                        "label": q_label,
+                        "ext": "mp4",
+                        "type": "video",
+                        "download_url": v.get("url"),
+                        "filesize_approx": size_bytes
+                    })
+            
+            if not formats:
+                return None
+                
+            return {
+                "type": "video",
+                "title": data.get("title", "Facebook Video"),
+                "thumbnail": None,
+                "duration": None,
+                "channel": "Facebook",
+                "platform": "facebook (chative)",
+                "webpage_url": url,
+                "formats": formats
+            }
+        except Exception as e:
+            logger.error(f"Chative fetch failed: {e}")
+            return None
     return None
 
 
@@ -514,7 +580,22 @@ async def fetch_metadata(body: FetchRequest):
     logger.info("Fetching metadata for: %s", url)
     loop = asyncio.get_event_loop()
 
-    # ── Vidssave Exclusive Flow (YouTube, Instagram, Facebook) ────────────────
+    # ── Chative Exclusive Flow (Facebook) ──────────────────────────────────
+    if any(x in url.lower() for x in ["facebook.com", "fb.com", "fb.watch"]):
+        logger.info("Using Chative API for Facebook metadata: %s", url)
+        try:
+            fb_data = await _fetch_chative_fb_metadata(url)
+            if fb_data:
+                return JSONResponse(fb_data)
+            else:
+                raise HTTPException(status_code=422, detail="Chative could not find any formats for this Facebook video.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("Chative fetch failed: %s", e)
+            raise HTTPException(status_code=422, detail=f"Facebook Metadata Error (Chative): {str(e)}")
+
+    # ── Vidssave Exclusive Flow (YouTube, Instagram, etc.) ──────────────────
     if _use_vidssave(url):
         platform_name = _get_vidssave_platform(url).capitalize()
         logger.info("Using Vidssave API for %s metadata: %s", platform_name, url)
@@ -548,8 +629,8 @@ async def fetch_metadata(body: FetchRequest):
         info = await _extract_with_retry()
     except Exception as e:
         logger.error("yt-dlp error: %s", e)
-        # ── Smart Fallback for FB/IG ──
-        if any(x in url.lower() for x in ["facebook.com", "fb.com", "fb.watch", "instagram.com", "instagr.am", "ig.me"]):
+        # ── Smart Fallback for Instagram ──
+        if any(x in url.lower() for x in ["instagram.com", "instagr.am", "ig.me"]):
              logger.info("yt-dlp failed for %s. Attempting Vidssave fallback...", url)
              try:
                  vids_data = await _fetch_vidssave_metadata(url)
@@ -724,11 +805,11 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
     tmp_path = tmp.name
     tmp.close()
     
-    if body.format_id.startswith("vidssave_"):
+    if body.format_id.startswith("vidssave_") or body.format_id.startswith("chative_"):
         d_url = body.download_url
         
-        # If no direct URL, try resolving from resource_content (Facebook/IG flow)
-        if not d_url and body.resource_content:
+        # If no direct URL, try resolving from resource_content (Facebook/IG flow for Vidssave)
+        if not d_url and body.resource_content and body.format_id.startswith("vidssave_"):
             logger.info(f"Job {job_id} requires SSE resolution. Resolving...")
             job["status"] = "generating direct link"
             d_url = await _resolve_vidssave_stream_url(body.resource_content)
@@ -736,10 +817,15 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
         if d_url:
             await _run_direct_download(job_id, d_url, tmp_path)
             return
-        else:
+        elif body.format_id.startswith("vidssave_"):
             logger.error(f"Vidssave job {job_id} missing final download link. Body: %s", body.model_dump())
             job["status"] = "failed"
             job["error"] = "Vidssave source URL generation failed. Please try again."
+            return
+        else:
+            logger.error(f"Chative job {job_id} missing final download link. Body: %s", body.model_dump())
+            job["status"] = "failed"
+            job["error"] = "Chative source URL missing. Please try again."
             return
 
 
