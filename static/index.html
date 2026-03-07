@@ -643,7 +643,7 @@
           ${sizeLabel ? `<span class="opacity-60 text-xs">~${sizeLabel}</span>` : ''}
         `;
         btn.title = `Download ${fmt.label}`;
-        btn.onclick = () => triggerDownload(currentVideoUrl, fmt.format_id, fmt.ext, currentTitle, btn);
+        btn.onclick = () => triggerDownload(currentVideoUrl, fmt.format_id, fmt.ext, currentTitle, btn, fmt.download_url);
         container.appendChild(btn);
       });
 
@@ -696,7 +696,7 @@
     }
 
     // ── Download Trigger (Downbot Style Job System) ──────────────────
-    async function triggerDownload(videoUrl, formatId, ext, title, btn) {
+    async function triggerDownload(videoUrl, formatId, ext, title, btn, downloadUrl = null) {
       btn.disabled = true;
       const originalHTML = btn.innerHTML;
       btn.innerHTML = `<svg class="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Initializing...`;
@@ -705,7 +705,7 @@
         const res = await fetch(`${API_BASE}/api/download/request`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: videoUrl, format_id: formatId, ext: ext, title: title }),
+          body: JSON.stringify({ url: videoUrl, format_id: formatId, ext: ext, title: title, download_url: downloadUrl }),
         });
         const data = await res.json();
 

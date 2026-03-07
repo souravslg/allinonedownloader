@@ -34,6 +34,8 @@ logger = logging.getLogger("viddl")
 # ─── Downloader Binaries ───────────────────────────────────────────────────
 FFMPEG_EXE: Optional[str] = None
 IS_KOYEB: bool = os.path.exists("/app") or "KOYEB" in os.environ
+VIDSSAVE_AUTH: str = "20250901majwlqo"
+VIDSSAVE_API: str = "https://api.vidssave.com/api/contentsite_api/media/parse"
 
 
 def _init_binaries() -> bool:
@@ -90,6 +92,7 @@ class DownloadJobRequest(BaseModel):
     format_id: str
     ext: str
     title: Optional[str] = None
+    download_url: Optional[str] = None
 
 # ─── Job Registry ─────────────────────────────────────────────────────────────
 # Stores job state: { job_id: { status, progress, title, ext, path, error } }
@@ -122,6 +125,61 @@ def _sanitize_filename(name: str) -> str:
 def _is_youtube(url: str) -> bool:
     """Return True if the URL is from YouTube."""
     return "youtube.com" in url or "youtu.be" in url
+
+
+async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
+    """Fetch metadata from vidssave.com API."""
+    try:
+        data = {
+            "auth": VIDSSAVE_AUTH,
+            "domain": "api-ak.vidssave.com",
+            "origin": "cache",
+            "link": url
+        }
+        headers = {
+            "Referer": "https://vidssave.com/",
+            "Origin": "https://vidssave.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(VIDSSAVE_API, data=data, headers=headers)
+            if resp.status_code != 200:
+                return None
+            
+            res_json = resp.json()
+            if res_json.get("status") != 1:
+                return None
+            
+            d = res_json.get("data", {})
+            formats = []
+            for res in d.get("resources", []):
+                q = res.get("quality", "Unknown")
+                f = res.get("format", "mp4").lower()
+                size = res.get("size")
+                size_str = f" (~{size // 1048576}MB)" if size else ""
+                
+                formats.append({
+                    "format_id": f"vidssave_{res.get('resource_id')}",
+                    "label": f"{q} ({f.upper()}) [Source 2]",
+                    "ext": f,
+                    "type": res.get("type", "video"),
+                    "download_url": res.get("download_url"),
+                    "filesize_approx": size
+                })
+            
+            return {
+                "type": "video",
+                "title": d.get("title", "YouTube video"),
+                "thumbnail": d.get("thumbnail"),
+                "duration": d.get("duration"),
+                "channel": "YouTube",
+                "platform": "youtube (vidssave)",
+                "webpage_url": url,
+                "formats": formats
+            }
+    except Exception as e:
+        logger.error(f"Vidssave metadata fetch failed: {e}")
+        return None
 
 
 def _build_ydl_opts(extra: dict | None = None) -> dict:
@@ -357,6 +415,15 @@ async def fetch_metadata(body: FetchRequest):
             error_msg = str(e)
             logger.error("pytubefix fetch failed: %s", error_msg)
             
+            # Try VidsSave as a primary fallback for region-blocked videos
+            try:
+                logger.info("Attempting VidsSave fallback for: %s", url)
+                vids_data = await _fetch_vidssave_metadata(url)
+                if vids_data:
+                    return JSONResponse(vids_data)
+            except Exception as ve:
+                logger.error("VidsSave fallback failed: %s", ve)
+
             # If it's a region/availability error, fallback to yt-dlp (Standard Flow)
             if "available in your region" in error_msg.lower() or "unavailable" in error_msg.lower():
                 logger.info("pytubefix failed due to region/availability. Falling back to yt-dlp flow...")
@@ -568,6 +635,10 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
     tmp_path = tmp.name
     tmp.close()
     
+    if body.format_id.startswith("vidssave_") and body.download_url:
+        await _run_direct_download(job_id, body.download_url, tmp_path)
+        return
+
     if _is_youtube(body.url):
         await _run_pytubefix_download(job_id, body, tmp_path)
         return
@@ -576,6 +647,7 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
     if body.format_id.startswith("pytubefix_"):
         await _run_pytubefix_download(job_id, body, tmp_path)
         return
+
 
 
     def _progress_hook(d):
@@ -940,4 +1012,28 @@ def _pytube_progress(job, stream, chunk, bytes_remaining):
     job["progress"] = int(percentage)
     job["status"] = "downloading"
 
-
+async def _run_direct_download(job_id: str, url: str, tmp_path: str):
+    """Download directly from a URL with progress tracking."""
+    job = JOBS[job_id]
+    try:
+        job["status"] = "downloading from source"
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            async with client.stream("GET", url, follow_redirects=True) as response:
+                total = int(response.headers.get("Content-Length", 0))
+                downloaded = 0
+                with open(tmp_path, "wb") as f:
+                    async for chunk in response.aiter_bytes():
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total > 0:
+                            job["progress"] = int((downloaded / total) * 100)
+        
+        job["path"] = tmp_path
+        job["status"] = "completed"
+        job["progress"] = 100
+        logger.info(f"Job {job_id} completed via direct download: {tmp_path}")
+    except Exception as e:
+        logger.error(f"Direct download failed: {e}")
+        job["status"] = "failed"
+        job["error"] = str(e)
+        _cleanup(tmp_path)
