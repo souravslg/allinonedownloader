@@ -354,9 +354,16 @@ async def fetch_metadata(body: FetchRequest):
                 "formats": formats
             })
         except Exception as e:
-            logger.error("pytubefix fetch failed: %s", e)
-            # If pytubefix fails, we could potentially fallback or just error
-            raise HTTPException(status_code=422, detail=f"YouTube Metadata Error: {str(e)}")
+            error_msg = str(e)
+            logger.error("pytubefix fetch failed: %s", error_msg)
+            
+            # If it's a region/availability error, fallback to yt-dlp (Standard Flow)
+            if "available in your region" in error_msg.lower() or "unavailable" in error_msg.lower():
+                logger.info("pytubefix failed due to region/availability. Falling back to yt-dlp flow...")
+                # Fall through to the standard flow below
+            else:
+                raise HTTPException(status_code=422, detail=f"YouTube Metadata Error: {error_msg}")
+
 
 
     # ── Standard Flow (Other Platforms) ──────────────────────────────────────
