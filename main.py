@@ -267,7 +267,7 @@ async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
                     
                     formats.append({
                         "format_id": f"vidssave_{res.get('resource_id')}",
-                        "label": f"{q} ({f.upper()}) [Source 2]",
+                        "label": f"{q} ({f.upper()})",
                         "ext": f,
                         "type": res.get("type", "video"),
                         "download_url": durl,
@@ -284,7 +284,7 @@ async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
                         best_a = audio_candidates[0]
                         formats.append({
                             "format_id": f"vidssave_{best_a.get('resource_id')}",
-                            "label": "Audio Only (MP3) [Source 2]",
+                            "label": "Audio Only (MP3)",
                             "ext": "mp3",
                             "type": "audio",
                             "download_url": best_a.get("download_url") or best_a.get("url") or best_a.get("link"),
@@ -306,7 +306,7 @@ async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
                     "thumbnail": d.get("thumbnail"),
                     "duration": d.get("duration"),
                     "channel": platform.capitalize(),
-                    "platform": f"{platform} (vidssave)",
+                    "platform": f"{platform}",
                     "webpage_url": url,
                     "formats": formats
                 }
@@ -357,7 +357,7 @@ async def _fetch_chative_fb_metadata(url: str) -> Optional[dict]:
                         
                     formats.append({
                         "format_id": f"chative_{q_key}",
-                        "label": q_label,
+                        "label": f"{q_label.replace(' Quality', '')} (MP4)",
                         "ext": "mp4",
                         "type": "video",
                         "download_url": v.get("url"),
@@ -373,7 +373,7 @@ async def _fetch_chative_fb_metadata(url: str) -> Optional[dict]:
                 "thumbnail": None,
                 "duration": None,
                 "channel": "Facebook",
-                "platform": "facebook (chative)",
+                "platform": "facebook",
                 "webpage_url": url,
                 "formats": formats
             }
@@ -511,10 +511,11 @@ def _pick_formats(info: dict) -> list[dict]:
             fmt_selector = f"{best['format_id']}+bestaudio[ext=m4a]/bestaudio"
 
         label = label_map.get(h) or f"{actual_height}p"
+        fmt_label = f"{label} (MP4)"
 
         result.append({
             "format_id": fmt_selector,
-            "label": label,
+            "label": fmt_label,
             "ext": "mp4",
             "height": actual_height,
             "filesize_approx": best.get("filesize") or best.get("filesize_approx"),
@@ -604,12 +605,12 @@ async def fetch_metadata(body: FetchRequest):
             if fb_data:
                 return JSONResponse(fb_data)
             else:
-                raise HTTPException(status_code=422, detail="Chative could not find any formats for this Facebook video.")
+                raise HTTPException(status_code=422, detail="Could not find any formats for this Facebook video.")
         except HTTPException:
             raise
         except Exception as e:
             logger.error("Chative fetch failed: %s", e)
-            raise HTTPException(status_code=422, detail=f"Facebook Metadata Error (Chative): {str(e)}")
+            raise HTTPException(status_code=422, detail=f"Facebook Metadata Error: {str(e)}")
 
     # ── Vidssave Exclusive Flow (YouTube, Instagram, etc.) ──────────────────
     if _use_vidssave(url):
@@ -620,12 +621,12 @@ async def fetch_metadata(body: FetchRequest):
             if vids_data:
                 return JSONResponse(vids_data)
             else:
-                raise HTTPException(status_code=422, detail=f"Vidssave could not find any formats for this {platform_name} video.")
+                raise HTTPException(status_code=422, detail=f"Could not find any formats for this {platform_name} video.")
         except HTTPException:
             raise
         except Exception as e:
             logger.error("Vidssave fetch failed: %s", e)
-            raise HTTPException(status_code=422, detail=f"{platform_name} Metadata Error (Vidssave): {str(e)}")
+            raise HTTPException(status_code=422, detail=f"{platform_name} Metadata Error: {str(e)}")
 
 
 
@@ -840,12 +841,12 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
         elif body.format_id.startswith("vidssave_"):
             logger.error(f"Vidssave job {job_id} missing final download link. Body: %s", body.model_dump())
             job["status"] = "failed"
-            job["error"] = "Vidssave source URL generation failed. Please try again."
+            job["error"] = "Source URL generation failed. Please try again."
             return
         else:
             logger.error(f"Chative job {job_id} missing final download link. Body: %s", body.model_dump())
             job["status"] = "failed"
-            job["error"] = "Chative source URL missing. Please try again."
+            job["error"] = "Source URL missing. Please try again."
             return
 
 
