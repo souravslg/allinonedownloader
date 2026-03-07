@@ -1,7 +1,7 @@
 # ─── Stage: Runtime ──────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
-# Install system dependencies: ffmpeg, curl, and Node.js (required for pytubefix PO Token generation)
+# Install system dependencies: ffmpeg, curl, and Node.js
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg curl nodejs && \
     rm -rf /var/lib/apt/lists/*
