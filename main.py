@@ -275,6 +275,23 @@ async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
                         "filesize_approx": size
                     })
                 
+                if formats and FFMPEG_AVAILABLE:
+                    # Look for best audio-only format to provide an MP3 option
+                    audio_candidates = [r for r in resources if r.get("type") == "audio" or "kbps" in r.get("quality", "").lower()]
+                    if audio_candidates:
+                        # Sort by quality/bitrate if possible
+                        audio_candidates.sort(key=lambda r: r.get("quality", ""), reverse=True)
+                        best_a = audio_candidates[0]
+                        formats.append({
+                            "format_id": f"vidssave_{best_a.get('resource_id')}",
+                            "label": "Audio Only (MP3) [Source 2]",
+                            "ext": "mp3",
+                            "type": "audio",
+                            "download_url": best_a.get("download_url") or best_a.get("url") or best_a.get("link"),
+                            "resource_content": best_a.get("resource_content"),
+                            "filesize_approx": best_a.get("size")
+                        })
+
                 if not formats and origin == "cache":
                     logger.info("Vidssave cache has resources but no valid download URLs, retrying with source...")
                     continue
