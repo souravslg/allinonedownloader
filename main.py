@@ -252,7 +252,8 @@ async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
                 for res in resources:
                     # Check multiple possible keys for the direct URL
                     durl = res.get("download_url") or res.get("url") or res.get("link")
-                    if not durl:
+                    resource_content = res.get("resource_content")
+                    if not durl and not resource_content:
                         continue
                         
                     q = res.get("quality", "Unknown")
