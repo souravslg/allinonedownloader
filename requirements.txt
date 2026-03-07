@@ -1,6 +1,6 @@
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
-yt-dlp>=2025.1.26
+yt-dlp>=2025.2.19
 
 python-multipart>=0.0.9
 aiofiles>=23.2.1
