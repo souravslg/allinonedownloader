@@ -374,16 +374,29 @@ async def fetch_metadata(body: FetchRequest):
             "extract_flat": "in_playlist",
         }
     )
-    loop = asyncio.get_event_loop()
-    def _extract():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(url, download=False)
+    async def _extract_with_retry():
+        try:
+            return await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=False))
+        except Exception as e:
+            err_msg = str(e).lower()
+            if ("index out of range" in err_msg or "unavailable" in err_msg) and _is_youtube(url):
+                logger.info("yt-dlp failed (likely signature/parsing issue). Retrying with safe options...")
+                safe_opts = _build_ydl_opts({
+                    "skip_download": True,
+                    "extractor_args": {"youtube": {"player_client": ["android", "ios"]}}
+                })
+                try:
+                    return await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(safe_opts).extract_info(url, download=False))
+                except:
+                    pass
+            raise e
     
     try:
-        info = await loop.run_in_executor(None, _extract)
+        info = await _extract_with_retry()
     except Exception as e:
         logger.error("yt-dlp error: %s", e)
         raise HTTPException(status_code=422, detail=f"Could not process URL: {str(e)}")
+
 
     # ── Playlist ──────────────────────────────────────────────────────────────
     if info.get("_type") == "playlist":
