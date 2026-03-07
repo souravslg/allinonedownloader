@@ -34,9 +34,8 @@ logger = logging.getLogger("viddl")
 # ─── Downloader Binaries ───────────────────────────────────────────────────
 FFMPEG_EXE: Optional[str] = None
 IS_KOYEB: bool = os.path.exists("/app") or "KOYEB" in os.environ
-# User provided specific RapidAPI Key
-RAPIDAPI_KEY: Optional[str] = os.environ.get("RAPIDAPI_KEY", "104f93455emsha4a8e06a6af7a46p155429jsn80530d8ea7a9")
-RAPIDAPI_HOST: str = "youtube138.p.rapidapi.com"
+# FFmpeg detection already performed above
+logger.info("FFmpeg available: %s", FFMPEG_AVAILABLE)
 
 def _init_binaries() -> bool:
     """Detect ffmpeg binaries and set their paths."""
@@ -326,48 +325,40 @@ async def fetch_metadata(body: FetchRequest):
     logger.info("Fetching metadata for: %s", url)
     loop = asyncio.get_event_loop()
 
-    # ── YouTube RapidAPI Exclusive Flow ──────────────────────────────────────
+    # ── YouTube pytubefix Flow ────────────────────────────────────────────────
     if _is_youtube(url):
-        logger.info("Using RapidAPI (youtube138) for YouTube metadata")
-        if not RAPIDAPI_KEY:
-            raise HTTPException(
-                status_code=422, 
-                detail="YouTube downloads require a RAPIDAPI_KEY to be configured on this server."
-            )
-        
+        logger.info("Using pytubefix for YouTube metadata: %s", url)
         try:
-            video_id = _get_youtube_id(url)
-            headers = {
-                "X-RapidAPI-Key": RAPIDAPI_KEY,
-                "X-RapidAPI-Host": RAPIDAPI_HOST
-            }
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(
-                    f"https://{RAPIDAPI_HOST}/video/details", 
-                    params={"id": video_id, "hl": "en", "gl": "US"}, 
-                    headers=headers
-                )
-                data = resp.json()
-                if resp.status_code == 200:
-                    formats = [
-                        {"format_id": "rapidapi_best", "label": "Best Quality (RapidAPI)", "ext": "mp4", "type": "video"},
-                        {"format_id": "rapidapi_mp3", "label": "MP3 Audio (RapidAPI)", "ext": "mp3", "type": "audio"},
-                    ]
-                    return JSONResponse({
-                        "type": "video",
-                        "title": data.get("title", f"YouTube Video {video_id}"),
-                        "thumbnail": data.get("thumbnails", [{}])[-1].get("url"),
-                        "duration": int(data.get("lengthSeconds", 0)),
-                        "channel": data.get("author", {}).get("title"),
-                        "platform": "youtube (rapidapi)",
-                        "webpage_url": url,
-                        "formats": formats
-                    })
-                else:
-                    raise Exception(f"RapidAPI responded with {resp.status_code}: {data.get('message')}")
+            from pytubefix import YouTube
+            def _get_yt():
+                # Use a common user agent to avoid some blocks
+                return YouTube(url, use_oauth=False, allow_oauth_cache=True)
+            
+            yt = await loop.run_in_executor(None, _get_yt)
+            
+            formats = []
+            # High quality video filters
+            formats.append({"format_id": "pytubefix_1080p", "label": "1080p HD (Pytube)", "ext": "mp4", "type": "video", "needs_merge": True})
+            formats.append({"format_id": "pytubefix_720p", "label": "720p HD (Pytube)", "ext": "mp4", "type": "video", "needs_merge": False})
+            formats.append({"format_id": "pytubefix_360p", "label": "360p (Pytube)", "ext": "mp4", "type": "video", "needs_merge": False})
+            formats.append({"format_id": "pytubefix_audio", "label": "Audio Only (M4A)", "ext": "m4a", "type": "audio"})
+            formats.append({"format_id": "pytubefix_mp3", "label": "Audio Only (MP3)", "ext": "mp3", "type": "audio"})
+
+            return JSONResponse({
+                "type": "video",
+                "title": yt.title,
+                "thumbnail": yt.thumbnail_url,
+                "duration": yt.length,
+                "channel": yt.author,
+                "platform": "youtube",
+                "webpage_url": url,
+                "formats": formats
+            })
         except Exception as e:
-            logger.error("RapidAPI fetch failed: %s", e)
-            raise HTTPException(status_code=422, detail=f"YouTube RapidAPI Error: {str(e)}")
+            logger.error("pytubefix fetch failed: %s", e)
+            # If pytubefix fails, we could potentially fallback or just error
+            raise HTTPException(status_code=422, detail=f"YouTube Metadata Error: {str(e)}")
+
 
     # ── Standard Flow (Other Platforms) ──────────────────────────────────────
     ydl_opts = _build_ydl_opts(
@@ -437,10 +428,6 @@ async def fetch_metadata(body: FetchRequest):
 
         formats = _pick_formats(info)
         
-        # Inject RapidAPI options if key is present
-        if RAPIDAPI_KEY and _is_youtube(url):
-            formats.append({"format_id": "rapidapi_best", "label": "Best (RapidAPI)", "ext": "mp4", "type": "video"})
-            formats.append({"format_id": "rapidapi_mp3", "label": "MP3 (RapidAPI)", "ext": "mp3", "type": "audio"})
 
     # Pick best thumbnail
     thumbnails = info.get("thumbnails") or []
@@ -551,13 +538,14 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
     tmp.close()
     
     if _is_youtube(body.url):
-        await _run_rapidapi_download(job_id, body, tmp_path)
+        await _run_pytubefix_download(job_id, body, tmp_path)
         return
 
-    # If format_id explicitly requested RapidAPI (e.g. from other platform if applicable)
-    if body.format_id.startswith("rapidapi_"):
-        await _run_rapidapi_download(job_id, body, tmp_path)
+    # If format_id explicitly requested pytubefix
+    if body.format_id.startswith("pytubefix_"):
+        await _run_pytubefix_download(job_id, body, tmp_path)
         return
+
 
     def _progress_hook(d):
         if d['status'] == 'downloading':
@@ -826,102 +814,99 @@ def _resolve_output_path(tmp_path: str, suffix: str) -> str:
     return tmp_path
 
 
-async def _run_rapidapi_download(job_id: str, body: DownloadJobRequest, tmp_path: str):
-    """Download using RapidAPI direct link extraction."""
+async def _run_pytubefix_download(job_id: str, body: DownloadJobRequest, tmp_path: str):
+    """Download using pytubefix."""
     job = JOBS[job_id]
-    if not RAPIDAPI_KEY:
-        job["status"] = "failed"
-        job["error"] = "RapidAPI key not configured"
-        return
-
+    from pytubefix import YouTube
+    from pytubefix.cli import on_progress
+    
     try:
-        job["status"] = "fetching direct link"
-        video_id = _get_youtube_id(body.url)
-        if not video_id:
-            raise Exception("Could not extract YouTube ID")
-
-        headers = {
-            "X-RapidAPI-Key": RAPIDAPI_KEY,
-            "X-RapidAPI-Host": RAPIDAPI_HOST
-        }
-        
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                f"https://{RAPIDAPI_HOST}/video/streaming-data", 
-                params={"id": video_id, "hl": "en", "gl": "US"}, 
-                headers=headers
+        job["status"] = "connecting to youtube"
+        def _get_yt():
+            return YouTube(
+                body.url, 
+                on_progress_callback=lambda stream, chunk, bytes_remaining: _pytube_progress(job, stream, chunk, bytes_remaining),
+                use_oauth=False,
+                allow_oauth_cache=True
             )
-            data = resp.json()
+        
+        loop = asyncio.get_event_loop()
+        yt = await loop.run_in_executor(None, _get_yt)
+        
+        job["status"] = "selecting stream"
+        stream = None
+        
+        if body.format_id == "pytubefix_1080p":
+            # 1080p is usually adaptive (video only), needs merge
+            stream = yt.streams.filter(res="1080p", file_extension="mp4", adaptive=True).first()
+            if not stream:
+                stream = yt.streams.filter(res="1080p", adaptive=True).first()
+        elif body.format_id == "pytubefix_720p":
+            stream = yt.streams.filter(res="720p", file_extension="mp4", progressive=True).first()
+            if not stream:
+                stream = yt.streams.filter(res="720p", progressive=True).first()
+        elif body.format_id == "pytubefix_360p":
+            stream = yt.streams.filter(res="360p", file_extension="mp4", progressive=True).first()
+        elif body.format_id in ("pytubefix_audio", "pytubefix_mp3"):
+            stream = yt.streams.filter(only_audio=True).first()
+
+        if not stream:
+            # Fallback to best progressive mp4
+            stream = yt.streams.get_highest_resolution()
+
+        job["status"] = "downloading"
+        
+        # Pytube download is blocking
+        def _do_download():
+            return stream.download(output_path=os.path.dirname(tmp_path), filename=os.path.basename(tmp_path))
+        
+        downloaded_path = await loop.run_in_executor(None, _do_download)
+        
+        # If it was adaptive 1080p, we might need to merge audio
+        if body.format_id == "pytubefix_1080p" and stream.is_adaptive and FFMPEG_EXE:
+            job["status"] = "fetching audio for merge"
+            audio_stream = yt.streams.filter(only_audio=True).first()
+            audio_tmp = downloaded_path + ".audio"
+            await loop.run_in_executor(None, lambda: audio_stream.download(output_path=os.path.dirname(tmp_path), filename=os.path.basename(audio_tmp)))
             
-        if resp.status_code != 200:
-            raise Exception(f"RapidAPI error: {data.get('message', 'Unknown error')}")
-
-        # youtube138 returns streamingData under streamingData or directly
-        sd = data.get('streamingData', {})
-        formats_list = sd.get('formats', []) + sd.get('adaptiveFormats', [])
-        
-        if not formats_list:
-            # Maybe it's top level?
-            formats_list = data.get('formats', []) + data.get('adaptiveFormats', [])
-
-        download_url = None
-        if body.format_id == "rapidapi_mp3":
-            # Best audio-only
-            audio_formats = sorted(
-                [f for f in formats_list if 'audio' in f.get('mimeType', '').lower() and 'video' not in f.get('mimeType', '').lower()],
-                key=lambda x: int(x.get('bitrate', 0) or 0),
-                reverse=True
-            )
-            if audio_formats: download_url = audio_formats[0].get('url')
-        else:
-            # Best combined video+audio
-            video_formats = sorted(
-                [f for f in formats_list if 'video/mp4' in f.get('mimeType', '').lower() and f.get('url')],
-                key=lambda x: int(x.get('height', 0) or 0),
-                reverse=True
-            )
-            if video_formats: download_url = video_formats[0].get('url')
-
-        if not download_url:
-            # Any valid url
-            for f in formats_list:
-                if f.get('url'):
-                    download_url = f['url']
-                    break
-        
-        if not download_url:
-            raise Exception("No download URL found in RapidAPI response")
-
-        job["status"] = "downloading from cdn"
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream("GET", download_url) as response:
-                total = int(response.headers.get("Content-Length", 0))
-                downloaded = 0
-                with open(tmp_path, "wb") as f:
-                    async for chunk in response.aiter_bytes():
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total > 0:
-                            job["progress"] = int((downloaded / total) * 100)
-
-        # Post-process (conversion) if needed
-        if body.ext == "mp3" and FFMPEG_EXE:
-            job["status"] = "converting to mp3"
-            final_path = tmp_path.rsplit('.', 1)[0] + ".mp3"
-            cmd = [FFMPEG_EXE, "-i", tmp_path, "-vn", "-ab", "192k", "-ar", "44100", "-y", final_path]
+            job["status"] = "merging video and audio"
+            merged_path = downloaded_path + ".merged.mp4"
+            cmd = [FFMPEG_EXE, "-i", downloaded_path, "-i", audio_tmp, "-c:v", "copy", "-c:a", "aac", "-y", merged_path]
             subprocess.run(cmd, capture_output=True)
-            _cleanup(tmp_path)
-            job["path"] = final_path
-            job["ext"] = "mp3"
-        else:
-            job["path"] = tmp_path
-        
+            
+            _cleanup(downloaded_path)
+            _cleanup(audio_tmp)
+            if os.path.exists(merged_path):
+                os.replace(merged_path, downloaded_path)
+
+        # Handle MP3 conversion if requested
+        if body.format_id == "pytubefix_mp3" and FFMPEG_EXE:
+            job["status"] = "converting to mp3"
+            mp3_path = downloaded_path.rsplit('.', 1)[0] + ".mp3"
+            cmd = [FFMPEG_EXE, "-i", downloaded_path, "-vn", "-ab", "192k", "-y", mp3_path]
+            subprocess.run(cmd, capture_output=True)
+            _cleanup(downloaded_path)
+            downloaded_path = mp3_path
+
+        job["path"] = downloaded_path
         job["status"] = "completed"
         job["progress"] = 100
-        logger.info(f"Job {job_id} completed via RapidAPI: {job['path']}")
+        job["ext"] = os.path.splitext(downloaded_path)[1].lstrip('.')
+        logger.info(f"Job {job_id} completed via pytubefix: {downloaded_path}")
 
     except Exception as e:
-        logger.exception(f"RapidAPI job {job_id} failed")
+        logger.exception(f"pytubefix job {job_id} failed")
         job["status"] = "failed"
         job["error"] = str(e)
-        _cleanup(tmp_path)
+        if 'downloaded_path' in locals() and os.path.exists(downloaded_path):
+            _cleanup(downloaded_path)
+
+def _pytube_progress(job, stream, chunk, bytes_remaining):
+    """Callback for pytubefix progress."""
+    total_size = stream.filesize
+    bytes_downloaded = total_size - bytes_remaining
+    percentage = (bytes_downloaded / total_size) * 100
+    job["progress"] = int(percentage)
+    job["status"] = "downloading"
+
+
