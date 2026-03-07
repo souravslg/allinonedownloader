@@ -167,6 +167,9 @@ async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
                     "filesize_approx": size
                 })
             
+            if not formats:
+                return None
+
             return {
                 "type": "video",
                 "title": d.get("title", "YouTube video"),
@@ -177,6 +180,7 @@ async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
                 "webpage_url": url,
                 "formats": formats
             }
+
     except Exception as e:
         logger.error(f"Vidssave metadata fetch failed: {e}")
         return None
@@ -415,7 +419,7 @@ async def fetch_metadata(body: FetchRequest):
             error_msg = str(e)
             logger.error("pytubefix fetch failed: %s", error_msg)
             
-            # Try VidsSave as a primary fallback for region-blocked videos
+            # Try VidsSave as a primary fallback
             try:
                 logger.info("Attempting VidsSave fallback for: %s", url)
                 vids_data = await _fetch_vidssave_metadata(url)
@@ -424,12 +428,10 @@ async def fetch_metadata(body: FetchRequest):
             except Exception as ve:
                 logger.error("VidsSave fallback failed: %s", ve)
 
-            # If it's a region/availability error, fallback to yt-dlp (Standard Flow)
-            if "available in your region" in error_msg.lower() or "unavailable" in error_msg.lower():
-                logger.info("pytubefix failed due to region/availability. Falling back to yt-dlp flow...")
-                # Fall through to the standard flow below
-            else:
-                raise HTTPException(status_code=422, detail=f"YouTube Metadata Error: {error_msg}")
+            # Final fall-through: If it's YouTube but pytube/vidssave failed, 
+            # we MUST let it fall through to the yt-dlp block below.
+            logger.info("pytubefix and vidsave failed. Falling back to final yt-dlp flow...")
+            # We don't raise here; we let it fall through to the Standard Flow.
 
 
 
