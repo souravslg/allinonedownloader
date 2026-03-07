@@ -327,6 +327,8 @@ def _build_ydl_opts(extra: dict | None = None) -> dict:
         "retries": 10,
         "fragment_retries": 10,
         "retry_sleep_functions": {"http": lambda n: 5},
+        "concurrent_fragment_downloads": 5,
+        "socket_timeout": 30,
         "merge_output_format": "mp4",
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
