@@ -122,9 +122,17 @@ def _sanitize_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", name)
 
 
-def _is_youtube(url: str) -> bool:
-    """Return True if the URL is from YouTube."""
-    return "youtube.com" in url or "youtu.be" in url
+def _use_vidssave(url: str) -> bool:
+    """Return True if the URL should be handled by Vidssave API."""
+    u = url.lower()
+    return any(x in u for x in ["youtube.com", "youtu.be", "instagram.com", "facebook.com", "fb.watch"])
+
+def _get_vidssave_platform(url: str) -> str:
+    u = url.lower()
+    if "youtube.com" in u or "youtu.be" in u: return "youtube"
+    if "instagram.com" in u: return "instagram"
+    if "facebook.com" in u or "fb.watch" in u: return "facebook"
+    return "social"
 
 
 async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
@@ -180,13 +188,14 @@ async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
                         "filesize_approx": size
                     })
                 
+                platform = _get_vidssave_platform(url)
                 return {
                     "type": "video",
-                    "title": d.get("title", "YouTube video"),
+                    "title": d.get("title", f"{platform.capitalize()} video"),
                     "thumbnail": d.get("thumbnail"),
                     "duration": d.get("duration"),
-                    "channel": "YouTube",
-                    "platform": "youtube (vidssave)",
+                    "channel": platform.capitalize(),
+                    "platform": f"{platform} (vidssave)",
                     "webpage_url": url,
                     "formats": formats
                 }
@@ -399,20 +408,21 @@ async def fetch_metadata(body: FetchRequest):
     logger.info("Fetching metadata for: %s", url)
     loop = asyncio.get_event_loop()
 
-    # ── YouTube Vidssave Exclusive Flow ───────────────────────────────────────
-    if _is_youtube(url):
-        logger.info("Using Vidssave API exclusively for YouTube metadata: %s", url)
+    # ── Vidssave Exclusive Flow (YouTube, Instagram, Facebook) ────────────────
+    if _use_vidssave(url):
+        platform_name = _get_vidssave_platform(url).capitalize()
+        logger.info("Using Vidssave API for %s metadata: %s", platform_name, url)
         try:
             vids_data = await _fetch_vidssave_metadata(url)
             if vids_data:
                 return JSONResponse(vids_data)
             else:
-                raise HTTPException(status_code=422, detail="Vidssave could not find any formats for this YouTube video.")
+                raise HTTPException(status_code=422, detail=f"Vidssave could not find any formats for this {platform_name} video.")
         except HTTPException:
             raise
         except Exception as e:
             logger.error("Vidssave fetch failed: %s", e)
-            raise HTTPException(status_code=422, detail=f"YouTube Metadata Error (Vidssave): {str(e)}")
+            raise HTTPException(status_code=422, detail=f"{platform_name} Metadata Error (Vidssave): {str(e)}")
 
 
 
