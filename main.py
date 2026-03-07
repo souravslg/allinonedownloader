@@ -209,6 +209,8 @@ async def _resolve_vidssave_stream_url(resource_content: str) -> Optional[str]:
 def _get_vidssave_platform(url: str) -> str:
     u = url.lower()
     if "youtube.com" in u or "youtu.be" in u: return "youtube"
+    if any(x in u for x in ["instagram.com", "instagr.am", "ig.me"]): return "instagram"
+    if any(x in u for x in ["facebook.com", "fb.com", "fb.watch"]): return "facebook"
     if "tiktok.com" in u: return "tiktok"
     if "x.com" in u or "twitter.com" in u: return "x"
     return "social"
@@ -546,6 +548,16 @@ async def fetch_metadata(body: FetchRequest):
         info = await _extract_with_retry()
     except Exception as e:
         logger.error("yt-dlp error: %s", e)
+        # ── Smart Fallback for FB/IG ──
+        if any(x in url.lower() for x in ["facebook.com", "fb.com", "fb.watch", "instagram.com", "instagr.am", "ig.me"]):
+             logger.info("yt-dlp failed for %s. Attempting Vidssave fallback...", url)
+             try:
+                 vids_data = await _fetch_vidssave_metadata(url)
+                 if vids_data:
+                      return JSONResponse(vids_data)
+             except:
+                 pass
+        
         raise HTTPException(status_code=422, detail=f"Could not process URL: {str(e)}")
 
 
