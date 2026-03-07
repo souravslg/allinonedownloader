@@ -323,8 +323,17 @@ def _build_ydl_opts(extra: dict | None = None) -> dict:
         # Prefer HTTP(S) sources, skip DRM-protected formats
         "format_sort": ["res", "ext:mp4:m4a", "br", "asr"],
         "nocheckcertificate": True,
+        "check_formats": True,
+        "retries": 10,
+        "fragment_retries": 10,
+        "retry_sleep_functions": {"http": lambda n: 5},
         "merge_output_format": "mp4",
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.facebook.com/",
+        },
     }
     
     # YouTube bypass using environment variables
@@ -741,6 +750,7 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "logger": logger, # Use our logger to see internal yt-dlp errors
     })
     
     if FFMPEG_EXE:
@@ -777,6 +787,15 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
                     actual_path = mp4_path.replace(".mp4_final", ".mp4")
                     os.replace(mp4_path, actual_path)
 
+            # Check if file is valid and not 0 bytes
+            fsize = os.path.getsize(actual_path)
+            if fsize == 0:
+                logger.error(f"Job {job_id} produced a 0-byte file: {actual_path}")
+                job["status"] = "failed"
+                job["error"] = "Downloaded file is empty (0 bytes). This usually means the platform blocked the request or the link expired."
+                _cleanup(actual_path)
+                return
+
             job["path"] = actual_path
             job["status"] = "completed"
             job["progress"] = 100
@@ -785,7 +804,7 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
             detected_ext = os.path.splitext(actual_path)[1].lstrip('.')
             job["ext"] = detected_ext if detected_ext else body.ext
             
-            logger.info(f"Job {job_id} completed: {actual_path}")
+            logger.info(f"Job {job_id} completed: {actual_path} ({fsize} bytes)")
         else:
             job["status"] = "failed"
             job["error"] = "Output file resolution failed"
