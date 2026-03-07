@@ -34,8 +34,7 @@ logger = logging.getLogger("viddl")
 # ─── Downloader Binaries ───────────────────────────────────────────────────
 FFMPEG_EXE: Optional[str] = None
 IS_KOYEB: bool = os.path.exists("/app") or "KOYEB" in os.environ
-# FFmpeg detection already performed above
-logger.info("FFmpeg available: %s", FFMPEG_AVAILABLE)
+
 
 def _init_binaries() -> bool:
     """Detect ffmpeg binaries and set their paths."""
