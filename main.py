@@ -128,62 +128,75 @@ def _is_youtube(url: str) -> bool:
 
 
 async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
-    """Fetch metadata from vidssave.com API."""
-    try:
-        data = {
-            "auth": VIDSSAVE_AUTH,
-            "domain": "api-ak.vidssave.com",
-            "origin": "cache",
-            "link": url
-        }
-        headers = {
-            "Referer": "https://vidssave.com/",
-            "Origin": "https://vidssave.com/",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        }
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(VIDSSAVE_API, data=data, headers=headers)
-            if resp.status_code != 200:
-                return None
-            
-            res_json = resp.json()
-            if res_json.get("status") != 1:
-                return None
-            
-            d = res_json.get("data", {})
-            formats = []
-            for res in d.get("resources", []):
-                q = res.get("quality", "Unknown")
-                f = res.get("format", "mp4").lower()
-                size = res.get("size")
-                size_str = f" (~{size // 1048576}MB)" if size else ""
+    """Fetch metadata from vidssave.com API with retry for source origin."""
+    headers = {
+        "Referer": "https://vidssave.com/",
+        "Origin": "https://vidssave.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    }
+    
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        # Try 'cache' first, then 'source' if no resources found
+        for origin in ["cache", "source"]:
+            try:
+                data = {
+                    "auth": VIDSSAVE_AUTH,
+                    "domain": "api-ak.vidssave.com",
+                    "origin": origin,
+                    "link": url
+                }
+                logger.info(f"Vidssave fetch attempt with origin: {origin}")
+                resp = await client.post(VIDSSAVE_API, data=data, headers=headers)
                 
-                formats.append({
-                    "format_id": f"vidssave_{res.get('resource_id')}",
-                    "label": f"{q} ({f.upper()}) [Source 2]",
-                    "ext": f,
-                    "type": res.get("type", "video"),
-                    "download_url": res.get("download_url"),
-                    "filesize_approx": size
-                })
-            
-            if not formats:
-                return None
+                if resp.status_code != 200:
+                    continue
+                    
+                res_json = resp.json()
+                if res_json.get("status") != 1:
+                    continue
+                    
+                d = res_json.get("data", {})
+                resources = d.get("resources", [])
+                
+                if not resources and origin == "cache":
+                    logger.info("Vidssave cache miss, retrying with source...")
+                    continue
+                
+                if not resources:
+                    return None
 
-            return {
-                "type": "video",
-                "title": d.get("title", "YouTube video"),
-                "thumbnail": d.get("thumbnail"),
-                "duration": d.get("duration"),
-                "channel": "YouTube",
-                "platform": "youtube (vidssave)",
-                "webpage_url": url,
-                "formats": formats
-            }
+                formats = []
+                for res in resources:
+                    q = res.get("quality", "Unknown")
+                    f = res.get("format", "mp4").lower()
+                    size = res.get("size")
+                    
+                    formats.append({
+                        "format_id": f"vidssave_{res.get('resource_id')}",
+                        "label": f"{q} ({f.upper()}) [Source 2]",
+                        "ext": f,
+                        "type": res.get("type", "video"),
+                        "download_url": res.get("download_url"),
+                        "filesize_approx": size
+                    })
+                
+                return {
+                    "type": "video",
+                    "title": d.get("title", "YouTube video"),
+                    "thumbnail": d.get("thumbnail"),
+                    "duration": d.get("duration"),
+                    "channel": "YouTube",
+                    "platform": "youtube (vidssave)",
+                    "webpage_url": url,
+                    "formats": formats
+                }
+            except Exception as e:
+                logger.error(f"Vidssave attempt ({origin}) failed: {e}")
+                if origin == "source":
+                    return None
+    return None
 
-    except Exception as e:
-        logger.error(f"Vidssave metadata fetch failed: {e}")
-        return None
+
 
 
 def _build_ydl_opts(extra: dict | None = None) -> dict:
