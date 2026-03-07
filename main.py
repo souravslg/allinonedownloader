@@ -164,7 +164,15 @@ async def _resolve_vidssave_stream_url(resource_content: str) -> Optional[str]:
                 
             # Step 2: Poll via SSE
             sse_url = f"https://api.vidssave.com/sse/contentsite_api/media/download_query"
-            sse_params = {"auth": VIDSSAVE_AUTH, "task_id": task_id}
+            sse_params = {
+                "auth": VIDSSAVE_AUTH,
+                "domain": "api-ak.vidssave.com",
+                "task_id": task_id,
+                "download_domain": "vidssave.com",
+                "origin": "content_site"
+            }
+            
+            headers["Accept"] = "text/event-stream"
             
             logger.info(f"Polling Vidssave SSE for task: {task_id[:10]}...")
             async with client.stream("GET", sse_url, params=sse_params, headers=headers, timeout=60.0) as sse_resp:
