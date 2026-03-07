@@ -183,6 +183,11 @@ async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
 
                 formats = []
                 for res in resources:
+                    # Check multiple possible keys for the direct URL
+                    durl = res.get("download_url") or res.get("url") or res.get("link")
+                    if not durl:
+                        continue
+                        
                     q = res.get("quality", "Unknown")
                     f = res.get("format", "mp4").lower()
                     size = res.get("size")
@@ -192,9 +197,16 @@ async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
                         "label": f"{q} ({f.upper()}) [Source 2]",
                         "ext": f,
                         "type": res.get("type", "video"),
-                        "download_url": res.get("download_url"),
+                        "download_url": durl,
                         "filesize_approx": size
                     })
+                
+                if not formats and origin == "cache":
+                    logger.info("Vidssave cache has resources but no valid download URLs, retrying with source...")
+                    continue
+                
+                if not formats:
+                    return None
                 
                 platform = _get_vidssave_platform(url)
                 return {
@@ -616,9 +628,15 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
     tmp_path = tmp.name
     tmp.close()
     
-    if body.format_id.startswith("vidssave_") and body.download_url:
-        await _run_direct_download(job_id, body.download_url, tmp_path)
-        return
+    if body.format_id.startswith("vidssave_"):
+        if body.download_url:
+            await _run_direct_download(job_id, body.download_url, tmp_path)
+            return
+        else:
+            logger.error(f"Vidssave job {job_id} missing download_url. Body: %s", body.model_dump())
+            job["status"] = "failed"
+            job["error"] = "Vidssave source URL is missing. Please try fetching again."
+            return
 
 
 
