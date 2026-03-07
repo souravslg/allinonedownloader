@@ -93,6 +93,7 @@ class DownloadJobRequest(BaseModel):
     ext: str
     title: Optional[str] = None
     download_url: Optional[str] = None
+    resource_content: Optional[str] = None
 
 # ─── Job Registry ─────────────────────────────────────────────────────────────
 # Stores job state: { job_id: { status, progress, title, ext, path, error } }
@@ -132,6 +133,72 @@ def _use_vidssave(url: str) -> bool:
         "tiktok.com", "x.com", "twitter.com"
     ]
     return any(x in u for x in vid_sources)
+
+async def _resolve_vidssave_stream_url(resource_content: str) -> Optional[str]:
+    """Perform the 2-step media/download -> SSE query for direct URL generation."""
+    headers = {
+        "Referer": "https://vidssave.com/",
+        "Origin": "https://vidssave.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    }
+    
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Step 1: Request task_id
+        dl_api = "https://api.vidssave.com/api/contentsite_api/media/download"
+        data = {
+            "auth": VIDSSAVE_AUTH,
+            "domain": "api-ak.vidssave.com",
+            "request": resource_content,
+            "no_encrypt": "1"
+        }
+        try:
+            resp_dl = await client.post(dl_api, data=data, headers=headers)
+            if resp_dl.status_code != 200:
+                logger.error(f"Vidssave media/download error: {resp_dl.status_code}")
+                return None
+                
+            task_id = resp_dl.json().get("data", {}).get("task_id")
+            if not task_id:
+                logger.error("Vidssave media/download returned no task_id")
+                return None
+                
+            # Step 2: Poll via SSE
+            sse_url = f"https://api.vidssave.com/sse/contentsite_api/media/download_query"
+            sse_params = {"auth": VIDSSAVE_AUTH, "task_id": task_id}
+            
+            logger.info(f"Polling Vidssave SSE for task: {task_id[:10]}...")
+            async with client.stream("GET", sse_url, params=sse_params, headers=headers, timeout=60.0) as sse_resp:
+                async for line in sse_resp.aiter_lines():
+                    if "data:" in line:
+                        data_str = line.replace("data:", "").strip()
+                        if not data_str: continue
+                        try:
+                            # Vidssave sometimes returns raw JSON or prefixed data
+                            evt_data = json.loads(data_str)
+                            # Some responses might have a 'data' wrap
+                            inner = evt_data.get("data") if isinstance(evt_data.get("data"), dict) else evt_data
+                            
+                            # 'status': 'success' is the event we want
+                            if evt_data.get("status") == "success" or evt_data.get("event") == "success":
+                                final_url = inner.get("url") or inner.get("link")
+                                if final_url:
+                                    logger.info(f"Vidssave SSE SUCCESS. URL generated.")
+                                    return final_url
+                            
+                            if evt_data.get("status") == "failed":
+                                logger.error(f"Vidssave SSE reported failure: {evt_data.get('message')}")
+                                return None
+                        except Exception as parse_err:
+                            # If it's not JSON, might be status text
+                            if "success" in data_str.lower() and "http" in data_str:
+                                # regex fallback for raw string
+                                match = re.search(r'(https?://[^\s",}]+)', data_str)
+                                if match: return match.group(1)
+            
+            return None
+        except Exception as e:
+            logger.error(f"Vidssave URL resolution workflow failed: {e}")
+            return None
 
 def _get_vidssave_platform(url: str) -> str:
     u = url.lower()
@@ -198,6 +265,7 @@ async def _fetch_vidssave_metadata(url: str) -> Optional[dict]:
                         "ext": f,
                         "type": res.get("type", "video"),
                         "download_url": durl,
+                        "resource_content": res.get("resource_content"),
                         "filesize_approx": size
                     })
                 
@@ -629,13 +697,21 @@ async def _run_download_job(job_id: str, body: DownloadJobRequest):
     tmp.close()
     
     if body.format_id.startswith("vidssave_"):
-        if body.download_url:
-            await _run_direct_download(job_id, body.download_url, tmp_path)
+        d_url = body.download_url
+        
+        # If no direct URL, try resolving from resource_content (Facebook/IG flow)
+        if not d_url and body.resource_content:
+            logger.info(f"Job {job_id} requires SSE resolution. Resolving...")
+            job["status"] = "generating direct link"
+            d_url = await _resolve_vidssave_stream_url(body.resource_content)
+        
+        if d_url:
+            await _run_direct_download(job_id, d_url, tmp_path)
             return
         else:
-            logger.error(f"Vidssave job {job_id} missing download_url. Body: %s", body.model_dump())
+            logger.error(f"Vidssave job {job_id} missing final download link. Body: %s", body.model_dump())
             job["status"] = "failed"
-            job["error"] = "Vidssave source URL is missing. Please try fetching again."
+            job["error"] = "Vidssave source URL generation failed. Please try again."
             return
 
 
