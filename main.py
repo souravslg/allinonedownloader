@@ -127,7 +127,6 @@ def _use_vidssave(url: str) -> bool:
     """Return True if the URL should be handled by Vidssave API."""
     u = url.lower()
     vid_sources = [
-        "youtube.com", "youtu.be",
         "instagram.com", "instagr.am", "ig.me",
         "tiktok.com", "x.com", "twitter.com"
     ]
@@ -629,8 +628,12 @@ async def fetch_metadata(body: FetchRequest):
         info = await _extract_with_retry()
     except Exception as e:
         logger.error("yt-dlp error: %s", e)
-        # ── Smart Fallback for Instagram ──
-        if any(x in url.lower() for x in ["instagram.com", "instagr.am", "ig.me"]):
+        # ── Smart Fallback for YouTube/Instagram ──
+        u_low = url.lower()
+        is_yt = any(x in u_low for x in ["youtube.com", "youtu.be"])
+        is_ig = any(x in u_low for x in ["instagram.com", "instagr.am", "ig.me"])
+        
+        if is_yt or is_ig:
              logger.info("yt-dlp failed for %s. Attempting Vidssave fallback...", url)
              try:
                  vids_data = await _fetch_vidssave_metadata(url)
