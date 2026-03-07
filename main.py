@@ -392,15 +392,27 @@ async def fetch_metadata(body: FetchRequest):
         for entry in entries[:50]:  # Limit to 50 items per fetch
             if not entry:
                 continue
+            
+            # Robust thumbnail selection for playlist items
+            item_thumb = entry.get("thumbnail")
+            if not item_thumb:
+                entry_thumbs = entry.get("thumbnails")
+                if entry_thumbs:
+                    # Filter for those with URLs and pick the last one (usually highest res)
+                    valid_thumbs = [t for t in entry_thumbs if t.get("url")]
+                    if valid_thumbs:
+                        item_thumb = valid_thumbs[-1]["url"]
+
             playlist_items.append(
                 {
                     "id": entry.get("id", ""),
                     "title": entry.get("title", "Untitled"),
                     "url": entry.get("url") or entry.get("webpage_url") or entry.get("id"),
-                    "thumbnail": entry.get("thumbnail") or entry.get("thumbnails", [{}])[-1].get("url"),
+                    "thumbnail": item_thumb,
                     "duration": entry.get("duration"),
                 }
             )
+
         return JSONResponse(
             {
                 "type": "playlist",
